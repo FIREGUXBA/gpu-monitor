@@ -21,21 +21,23 @@ const RETAIN_MS = 24 * 3600 * 1000;
 const COMPACT_EVERY = 1800;
 const REMOTE_TIMEOUT = 9000;
 const KC_SERVICE = 'gpu-monitor-ssh';
-const CONTROL_PATH = join(
-  os.tmpdir(),
-  `gpu-monitor-${createHash('sha1').update(`${os.userInfo().username}:${SSH_HOST}`).digest('hex').slice(0, 8)}.sock`,
-);
 
-const SSH_ARGS = [
+const controlPathFor = (target) =>
+  join(
+    os.tmpdir(),
+    `gpu-monitor-${createHash('sha1').update(`${os.userInfo().username}:${target}`).digest('hex').slice(0, 8)}.sock`,
+  );
+
+const sshArgsFor = (target) => [
   '-o', 'BatchMode=yes',
   '-o', 'ConnectTimeout=8',
   '-o', 'ServerAliveInterval=15',
   '-o', 'ServerAliveCountMax=2',
   '-o', 'ControlMaster=auto',
-  '-o', `ControlPath=${CONTROL_PATH}`,
+  '-o', `ControlPath=${controlPathFor(target)}`,
   '-o', 'ControlPersist=120',
   '-o', 'LogLevel=ERROR',
-  SSH_HOST,
+  target,
 ];
 
 const SAMPLE_SCRIPT = `
@@ -58,6 +60,7 @@ echo '#END'
 const CUDA_SCRIPT = `nvidia-smi | sed -n 's/.*CUDA Version: \\([0-9.]*\\).*/\\1/p' | head -n 1`;
 
 const active = { mode: 'key', host: null, port: 22, user: null, fingerprint: null };
+let savedConfig = false;
 let password = null;
 let ssh2Client = null;
 let ssh2Ready = false;
@@ -66,15 +69,23 @@ let switching = false;
 let generation = 0;
 let historyFile = HISTORY_DEFAULT;
 
+const keyTarget = () => (active.mode === 'key' && active.host) || SSH_HOST;
+
 const targetLabel = () =>
-  active.mode === 'password' ? `${active.user}@${active.host}:${active.port}` : SSH_HOST;
+  active.mode === 'password' ? `${active.user}@${active.host}:${active.port}` : keyTarget();
 
 const accountKey = (cfg) => `${cfg.user}@${cfg.host}:${cfg.port}`;
 
-const historyFileFor = (cfg) =>
-  cfg && cfg.mode !== 'key'
-    ? join(DATA_DIR, `history-${createHash('sha1').update(accountKey(cfg)).digest('hex').slice(0, 12)}.jsonl`)
-    : HISTORY_DEFAULT;
+const historyFileFor = (cfg) => {
+  const key =
+    cfg &&
+    (cfg.mode === 'password'
+      ? accountKey(cfg)
+      : cfg.host && cfg.host !== SSH_HOST
+        ? `ssh:${cfg.host}`
+        : null);
+  return key ? join(DATA_DIR, `history-${createHash('sha1').update(key).digest('hex').slice(0, 12)}.jsonl`) : HISTORY_DEFAULT;
+};
 
 const errorWithStatus = (status, message) => {
   const e = new Error(message);
@@ -150,16 +161,30 @@ function validConfig(cfg) {
 async function writeConfigFile(cfg) {
   await mkdir(DATA_DIR, { recursive: true });
   const body = JSON.stringify(
-    { host: cfg.host, port: cfg.port, user: cfg.user, fingerprint: cfg.fingerprint || null },
+    cfg.mode === 'password'
+      ? { mode: 'password', host: cfg.host, port: cfg.port, user: cfg.user, fingerprint: cfg.fingerprint || null }
+      : { mode: 'key', host: cfg.host },
     null,
     2,
   ) + '\n';
   await writeFile(CONN_FILE, body, { mode: 0o600 });
+  savedConfig = true;
 }
 
 async function loadConnection() {
   try {
     const cfg = JSON.parse(await readFile(CONN_FILE, 'utf8'));
+    if (cfg && cfg.mode === 'key') {
+      if (typeof cfg.host !== 'string' || !cfg.host) return;
+      active.mode = 'key';
+      active.host = cfg.host;
+      active.port = 22;
+      active.user = null;
+      active.fingerprint = null;
+      historyFile = historyFileFor({ mode: 'key', host: cfg.host });
+      savedConfig = true;
+      return;
+    }
     if (!validConfig(cfg)) return;
     active.mode = 'password';
     active.host = cfg.host;
@@ -167,6 +192,7 @@ async function loadConnection() {
     active.user = cfg.user;
     active.fingerprint = typeof cfg.fingerprint === 'string' ? cfg.fingerprint : null;
     historyFile = historyFileFor({ ...active, mode: 'password' });
+    savedConfig = true;
     password = await keychainGet(accountKey(active));
   } catch {}
 }
@@ -316,9 +342,9 @@ async function runViaSsh2(script) {
 
 /* ---------- 系统 ssh（默认免密目标） ---------- */
 
-const execRemoteKey = (script) =>
+const execRemoteKey = (script, target) =>
   new Promise((res, rej) => {
-    execFile('ssh', [...SSH_ARGS, script], { timeout: REMOTE_TIMEOUT, maxBuffer: 8 << 20 }, (err, stdout, stderr) => {
+    execFile('ssh', [...sshArgsFor(target), script], { timeout: REMOTE_TIMEOUT, maxBuffer: 8 << 20 }, (err, stdout, stderr) => {
       if (err) {
         const msg = String(stderr || stdout || err.message || err).trim().split('\n')[0];
         const e = new Error(msg || 'ssh 执行失败');
@@ -331,16 +357,16 @@ const execRemoteKey = (script) =>
     });
   });
 
-async function runViaKey(script) {
+async function runViaKey(script, target = keyTarget()) {
   try {
-    return await execRemoteKey(script);
+    return await execRemoteKey(script, target);
   } catch (err) {
     // Mac 睡眠或断网后 ControlMaster 的旧 socket 可能失效，清掉重试一次
     if (err.exitCode === 255 || err.killed) {
       try {
-        await unlink(CONTROL_PATH);
+        await unlink(controlPathFor(target));
       } catch {}
-      return execRemoteKey(script);
+      return execRemoteKey(script, target);
     }
     throw err;
   }
@@ -638,7 +664,7 @@ async function loop() {
 
 /* ---------- 登录 / 清除 ---------- */
 
-async function login(input) {
+async function loginPassword(input) {
   const host = String(input.host ?? '').trim();
   const port = Number(input.port ?? 22);
   const user = String(input.user ?? '').trim();
@@ -672,7 +698,7 @@ async function login(input) {
     const newAccount = accountKey(cfg);
     await keychainSet(newAccount, pw);
     try {
-      await writeConfigFile(cfg);
+      await writeConfigFile({ ...cfg, mode: 'password' });
     } catch (err) {
       await keychainDelete(newAccount);
       throw err;
@@ -703,7 +729,7 @@ async function login(input) {
     lastError = null;
     lastGoodAt = null;
     await loadHistory(historyFileFor({ ...active, mode: 'password' }));
-    return { ok: true, target: targetLabel(), host: hostname, gpus: gpus.length };
+    return { ok: true, mode: 'password', target: targetLabel(), host: hostname, gpus: gpus.length };
   } catch (err) {
     if (probe) {
       try {
@@ -713,6 +739,68 @@ async function login(input) {
     throw err;
   } finally {
     switching = false;
+  }
+}
+
+async function loginKey(input) {
+  const alias = String(input.host ?? '').trim();
+  if (!alias || alias.length > 253 || /[\s\0]/.test(alias) || alias.startsWith('-')) {
+    throw errorWithStatus(400, 'SSH 别名或主机不合法');
+  }
+
+  switching = true;
+  try {
+    // 先用目标别名跑一遍采样脚本，确认免密可用后再切换
+    const out = await runViaKey(SAMPLE_SCRIPT, alias);
+    const parts = splitSections(out);
+    if (!parts.END) throw errorWithStatus(502, 'SSH 已连接，但远程采样失败');
+    const gpus = parseGpus(parts.GPU || []);
+    if (!gpus.length) throw errorWithStatus(502, 'SSH 已连接，但没有读到显卡');
+    const hostname = (parts.HOST || []).map((s) => s.trim()).filter(Boolean).pop() || alias;
+
+    const oldAccount = active.mode === 'password' ? accountKey(active) : null;
+    await writeConfigFile({ mode: 'key', host: alias });
+    closeSsh2();
+    password = null;
+    active.mode = 'key';
+    active.host = alias;
+    active.port = 22;
+    active.user = null;
+    active.fingerprint = null;
+    if (oldAccount) await keychainDelete(oldAccount);
+
+    generation++;
+    cudaVersion = null;
+    snapshot = null;
+    lastError = null;
+    lastGoodAt = null;
+    await loadHistory(historyFileFor({ mode: 'key', host: alias }));
+    return { ok: true, mode: 'key', target: targetLabel(), host: hostname, gpus: gpus.length };
+  } finally {
+    switching = false;
+  }
+}
+
+async function login(input) {
+  if (input.mode === 'key') return loginKey(input);
+  return loginPassword(input);
+}
+
+async function sshHostAliases() {
+  try {
+    const raw = await readFile(join(os.homedir(), '.ssh', 'config'), 'utf8');
+    const hosts = [];
+    for (const line of raw.split('\n')) {
+      const m = /^\s*Host\s+(.+?)\s*$/i.exec(line.replace(/#.*/, ''));
+      if (!m) continue;
+      for (const alias of m[1].split(/\s+/)) {
+        if (!alias || /[*?!]/.test(alias) || hosts.includes(alias)) continue;
+        hosts.push(alias);
+      }
+    }
+    return hosts;
+  } catch {
+    return [];
   }
 }
 
@@ -730,6 +818,7 @@ async function logout() {
     active.port = 22;
     active.user = null;
     active.fingerprint = null;
+    savedConfig = false;
     password = null;
     generation++;
     cudaVersion = null;
@@ -744,6 +833,11 @@ async function logout() {
 }
 
 /* ---------- HTTP ---------- */
+
+const connectionInfo = () =>
+  active.mode === 'password'
+    ? { mode: 'password', host: active.host, port: active.port, user: active.user }
+    : { mode: 'key', host: keyTarget() };
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -771,9 +865,8 @@ const server = createServer(async (req, res) => {
           error: lastError,
           lastGoodAt,
           mode: active.mode,
-          connection: active.mode === 'password'
-            ? { host: active.host, port: active.port, user: active.user }
-            : null,
+          saved: savedConfig,
+          connection: connectionInfo(),
         }
       : {
           target: targetLabel(),
@@ -786,11 +879,19 @@ const server = createServer(async (req, res) => {
           error: '正在采样…',
           pollMs: POLL_MS,
           mode: active.mode,
-          connection: active.mode === 'password'
-            ? { host: active.host, port: active.port, user: active.user }
-            : null,
+          saved: savedConfig,
+          connection: connectionInfo(),
         };
     sendJson(snapshot ? 200 : 503, body);
+    return;
+  }
+
+  if (url.pathname === '/api/ssh-hosts') {
+    if (req.method !== 'GET') {
+      sendJson(405, { error: 'method not allowed' });
+      return;
+    }
+    sendJson(200, { default: SSH_HOST, hosts: await sshHostAliases() });
     return;
   }
 
@@ -863,6 +964,5 @@ server.on('error', (err) => {
   process.exit(1);
 });
 server.listen(PORT, HOST, () => {
-  const where = active.mode === 'password' ? targetLabel() : `SSH: ${SSH_HOST}`;
-  console.log(`GPU 监控（${where}）: http://${HOST}:${PORT}`);
+  console.log(`GPU 监控（${targetLabel()}）: http://${HOST}:${PORT}`);
 });

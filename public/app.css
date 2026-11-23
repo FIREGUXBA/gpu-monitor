@@ -465,7 +465,28 @@ body.paused .live .dot { background: var(--faint); }
 .field-grid { display: grid; grid-template-columns: minmax(0, 1fr) 104px; gap: 12px 14px; }
 .field-grid label { display: grid; gap: 6px; color: var(--faint); font-size: var(--fs-small); }
 .field-grid label.wide { grid-column: 1 / -1; }
-.field-grid input {
+.mode-tabs {
+  display: inline-flex;
+  justify-self: start;
+  gap: 4px;
+  padding: 3px;
+  border: 1px solid var(--control);
+  border-radius: 8px;
+}
+.mode-tabs button {
+  padding: 5px 12px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--faint);
+  font-size: var(--fs-small);
+  cursor: pointer;
+  transition: background-color var(--t-hover) ease, color var(--t-hover) ease;
+}
+.mode-tabs button:hover { color: var(--text); }
+.mode-tabs button[aria-pressed="true"] { background: var(--raised); color: var(--text); }
+.field-grid input,
+.field-grid select {
   height: 36px;
   padding: 0 10px;
   border: 1px solid var(--control);
@@ -475,6 +496,7 @@ body.paused .live .dot { background: var(--faint); }
   font: inherit;
   font-size: var(--fs-body);
 }
+.field-grid select { cursor: pointer; }
 .field-grid input::placeholder { color: var(--faint); }
 .modal-note { color: var(--faint); font-size: 12px; line-height: 17px; }
 .modal-error {

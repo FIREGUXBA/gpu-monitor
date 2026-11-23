@@ -221,21 +221,32 @@
         <svg class="icon" aria-hidden="true"><use href="#i-close"/></svg>
       </button>
     </header>
-    <div class="field-grid">
-      <label>主机 / IP
-        <input id="cHost" name="host" autocomplete="off" spellcheck="false" placeholder="10.0.0.2 或 hostname" required>
-      </label>
-      <label>端口
-        <input id="cPort" name="port" type="number" inputmode="numeric" min="1" max="65535" value="22" required>
-      </label>
-      <label class="wide">用户名
-        <input id="cUser" name="user" autocomplete="username" spellcheck="false" required>
-      </label>
-      <label class="wide">密码
-        <input id="cPass" name="password" type="password" autocomplete="current-password" required>
+    <div class="mode-tabs" role="group" aria-label="登录方式">
+      <button type="button" data-mode="key" aria-pressed="true">SSH 配置</button>
+      <button type="button" data-mode="password" aria-pressed="false">账号密码</button>
+    </div>
+    <div class="field-grid" id="keyFields">
+      <label class="wide">选择 SSH 主机
+        <select id="cAlias" name="alias">
+          <option value="">正在读取 ~/.ssh/config…</option>
+        </select>
       </label>
     </div>
-    <p class="modal-note">密码保存在 macOS 钥匙串；未登录时仍默认使用 zhichen-server 免密连接。</p>
+    <div class="field-grid" id="passFields" hidden>
+      <label>主机 / IP
+        <input id="cHost" name="host" autocomplete="off" spellcheck="false" placeholder="10.0.0.2 或 hostname">
+      </label>
+      <label>端口
+        <input id="cPort" name="port" type="number" inputmode="numeric" min="1" max="65535" value="22">
+      </label>
+      <label class="wide">用户名
+        <input id="cUser" name="user" autocomplete="username" spellcheck="false">
+      </label>
+      <label class="wide">密码
+        <input id="cPass" name="password" type="password" autocomplete="current-password">
+      </label>
+    </div>
+    <p class="modal-note" id="modeNote"></p>
     <p class="modal-error" id="connectError" role="alert" hidden></p>
     <label class="trust-row" id="trustRow" hidden>
       <input type="checkbox" id="trustFp"> 信任新的主机指纹并继续

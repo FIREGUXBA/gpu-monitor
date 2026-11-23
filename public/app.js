@@ -350,7 +350,11 @@
   function syncConnectButton() {
     const c = state.data?.connection;
     const btn = $('#connectBtn');
-    const label = c ? `已登录 ${c.user}@${c.host}:${c.port}，点击切换` : '登录 SSH';
+    const label = c?.mode === 'password'
+      ? `已登录 ${c.user}@${c.host}:${c.port}，点击切换`
+      : c?.mode === 'key'
+        ? `免密连接 ${c.host}，点击切换`
+        : '登录 SSH';
     btn.title = label;
     btn.setAttribute('aria-label', label);
   }
@@ -495,22 +499,96 @@
   const connectSubmit = $('#connectSubmit');
   const connectClear = $('#connectClear');
   const passInput = $('#cPass');
+  const aliasSelect = $('#cAlias');
+  const keyFields = $('#keyFields');
+  const passFields = $('#passFields');
+  let connectMode = 'key';
+  let hostsLoaded = false;
+  let hostsLoading = false;
+  let preferredAlias = '';
+
+  function addAliasOption(alias, isDefault) {
+    const opt = document.createElement('option');
+    opt.value = alias;
+    opt.textContent = isDefault ? `${alias}（默认）` : alias;
+    aliasSelect.appendChild(opt);
+  }
+
+  function selectAlias(alias) {
+    if (!alias) return;
+    if (![...aliasSelect.options].some((o) => o.value === alias)) addAliasOption(alias);
+    aliasSelect.value = alias;
+  }
+
+  function setAliasPlaceholder(text) {
+    aliasSelect.textContent = '';
+    const opt = document.createElement('option');
+    opt.value = '';
+    opt.textContent = text;
+    aliasSelect.appendChild(opt);
+    aliasSelect.disabled = true;
+  }
+
+  async function loadSshHosts() {
+    if (hostsLoaded) {
+      selectAlias(preferredAlias);
+      return;
+    }
+    if (hostsLoading) return;
+    hostsLoading = true;
+    try {
+      const res = await fetch('/api/ssh-hosts', { cache: 'no-store' });
+      if (!res.ok) {
+        setAliasPlaceholder(res.status === 404 ? '需要重启监控服务后读取列表' : `读取 ~/.ssh/config 失败（${res.status}）`);
+        return;
+      }
+      const body = await res.json();
+      const hosts = body.hosts || [];
+      if (!hosts.length) {
+        setAliasPlaceholder('~/.ssh/config 里没有可用的 Host');
+        return;
+      }
+      aliasSelect.textContent = '';
+      aliasSelect.disabled = false;
+      hosts.forEach((h) => addAliasOption(h, h === body.default));
+      hostsLoaded = true;
+      selectAlias(preferredAlias || hosts[0]);
+    } catch {
+      setAliasPlaceholder('无法连接本地监控服务');
+    } finally {
+      hostsLoading = false;
+    }
+  }
+
+  function setConnectMode(mode) {
+    connectMode = mode;
+    $$('.mode-tabs button').forEach((b) => b.setAttribute('aria-pressed', b.dataset.mode === mode ? 'true' : 'false'));
+    keyFields.hidden = mode !== 'key';
+    passFields.hidden = mode !== 'password';
+    trustRow.hidden = true;
+    setText($('#modeNote'), mode === 'key'
+      ? '从本机 ~/.ssh/config 里选择主机，密钥、端口、用户名都来自该配置。'
+      : '账号密码登录，适合没有配置免密的主机；密码只保存在本机 macOS 钥匙串。');
+  }
 
   function openConnect() {
     const c = state.data?.connection;
-    $('#cHost').value = c?.host || '';
-    $('#cPort').value = c?.port || 22;
-    $('#cUser').value = c?.user || '';
+    const pwd = c?.mode === 'password' ? c : null;
+    $('#cHost').value = pwd?.host || '';
+    $('#cPort').value = pwd?.port || 22;
+    $('#cUser').value = pwd?.user || '';
+    preferredAlias = c?.mode === 'key' ? (c.host || '') : '';
     passInput.value = '';
     connectError.hidden = true;
-    trustRow.hidden = true;
     trustFp.checked = false;
-    connectClear.hidden = !c;
-    setText($('#connectStatus'), c
-      ? `当前：${c.user}@${c.host}:${c.port}（密码登录）。保存新目标会替换当前登录。`
-      : `当前：默认服务器 ${state.data?.target || 'zhichen-server'}（免密）。填写下方信息可切换到密码登录的服务器。`);
+    connectClear.hidden = !state.data?.saved;
+    setText($('#connectStatus'), pwd
+      ? `当前：${pwd.user}@${pwd.host}:${pwd.port}（账号密码）`
+      : `当前：${c?.host || state.data?.target || ''}（SSH 配置，免密）`);
+    setConnectMode(pwd ? 'password' : 'key');
+    void loadSshHosts();
     connectDialog.showModal();
-    setTimeout(() => (c ? passInput : $('#cHost')).focus(), 20);
+    setTimeout(() => (connectMode === 'password' ? passInput : aliasSelect).focus(), 20);
   }
 
   function showConnectError(msg) {
@@ -520,13 +598,26 @@
 
   connectForm.addEventListener('submit', async (e) => {
     e.preventDefault();
-    const payload = {
-      host: $('#cHost').value.trim(),
-      port: Number($('#cPort').value || 22),
-      user: $('#cUser').value.trim(),
-      password: passInput.value,
-    };
-    if (trustFp.checked && !trustRow.hidden) payload.trustNewFingerprint = true;
+    const typing = connectMode === 'password';
+    const payload = typing
+      ? {
+          mode: 'password',
+          host: $('#cHost').value.trim(),
+          port: Number($('#cPort').value || 22),
+          user: $('#cUser').value.trim(),
+          password: passInput.value,
+        }
+      : { mode: 'key', host: aliasSelect.value.trim() };
+    if (!payload.host) {
+      showConnectError(typing ? '请填写主机地址' : '请选择一个 SSH 主机');
+      (typing ? $('#cHost') : aliasSelect).focus();
+      return;
+    }
+    if (typing) {
+      if (!payload.user) { showConnectError('请填写用户名'); $('#cUser').focus(); return; }
+      if (!payload.password) { showConnectError('请填写密码'); passInput.focus(); return; }
+      if (trustFp.checked && !trustRow.hidden) payload.trustNewFingerprint = true;
+    }
     trustRow.hidden = true;
     connectError.hidden = true;
     connectSubmit.disabled = true;
@@ -575,6 +666,7 @@
   });
 
   $('#connectBtn').addEventListener('click', openConnect);
+  $$('.mode-tabs button').forEach((b) => b.addEventListener('click', () => setConnectMode(b.dataset.mode)));
   $('#connectClose').addEventListener('click', () => connectDialog.close());
   connectDialog.addEventListener('close', () => {
     passInput.value = '';
