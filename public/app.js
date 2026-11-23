@@ -224,19 +224,21 @@
     const map = ol._map || (ol._map = new Map());
     ol.querySelector(':scope > .empty')?.remove();
     tasks.forEach((t, i) => {
-      let li = map.get(t.pid);
+      // one process using several GPUs is several rows, so a row is identified by pid and GPU
+      const key = `${t.pid}:${t.gpu}`;
+      let li = map.get(key);
       if (!li) {
         li = buildTaskRow(t, detail);
         li.classList.add('is-new');
         setTimeout(() => li.classList.remove('is-new'), 320);
-        map.set(t.pid, li);
+        map.set(key, li);
       }
       updateTaskRow(li, t);
       if (ol.children[i] !== li) ol.insertBefore(li, ol.children[i] || null);
-      seen.add(t.pid);
+      seen.add(key);
     });
-    for (const [pid, li] of map) {
-      if (!seen.has(pid)) { li.remove(); map.delete(pid); }
+    for (const [key, li] of map) {
+      if (!seen.has(key)) { li.remove(); map.delete(key); }
     }
     if (!tasks.length) {
       const empty = document.createElement('li');

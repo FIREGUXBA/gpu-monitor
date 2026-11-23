@@ -243,8 +243,9 @@
     return ul;
   }
   const rectSwatch = (st, w = 14, h = 10, r = 2) => (sw) => paintRect(sw, st, 0, (12 - h) / 2, w, h, r);
-  // charts are laid out with measured text: draw again once the page's fonts have arrived
-  function settle(draw) { if (document.fonts) { document.fonts.ready.then(draw); document.fonts.addEventListener?.('loadingdone', draw, { once: true }); } }
+  // charts are laid out with measured text: draw again once the page's fonts have arrived, and only while they
+  // are still loading — a listener added after that would never fire and never go away
+  function settle(draw) { if (document.fonts && document.fonts.status === 'loading') { document.fonts.ready.then(draw); document.fonts.addEventListener?.('loadingdone', draw, { once: true }); } }
   const heightOf = (h) => (typeof h === 'function' ? h() : h);
 
   function line(el, { labels, series, format = fmt.int, tickFormat = null, height = 220, fill = false, min, max, step = false, annotations, reference, today = null, todayLabel = 'Today', endLabel = false, yTicks = null, xAt = null, legend = null }) {
@@ -614,6 +615,7 @@
     if (compareLabel && rows.some((r) => minutes(r.compare) != null)) items.push({ label: compareLabel, w: 8, draw: (sw) => tick(sw, 4, 6) });
     return { get svg() { return el.querySelector(':scope > svg'); }, legend: legendEl(items, legend) };
   }
-  function watch(el, draw) { if (!('ResizeObserver' in window)) return; let w = el.clientWidth; new ResizeObserver(() => { if (Math.abs(el.clientWidth - w) > 4) { w = el.clientWidth; draw(); } }).observe(el); }
+  // one observer per element: charts redraw on every poll, so a fresh observer each time would pile up forever
+  function watch(el, draw) { el._draw = draw; if (!('ResizeObserver' in window) || el._ro) return; let w = el.clientWidth; el._ro = new ResizeObserver(() => { if (Math.abs(el.clientWidth - w) > 4) { w = el.clientWidth; el._draw(); } }); el._ro.observe(el); }
   window.Charts = { line, bars, diverging, ring, barList, plan, bullet, timeline, matrix, timeStrip, ticks, fmt };
 })();

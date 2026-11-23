@@ -935,7 +935,14 @@ const server = createServer(async (req, res) => {
     res.writeHead(204).end();
     return;
   }
-  let path = decodeURIComponent(url.pathname);
+  let path;
+  try {
+    path = decodeURIComponent(url.pathname);
+  } catch {
+    // 一个残缺的百分号转义不能把进程带走（未处理的 Promise 拒绝会直接退出）
+    res.writeHead(400, { 'content-type': 'text/plain; charset=utf-8' }).end('bad request');
+    return;
+  }
   if (path === '/') path = '/index.html';
   const file = resolve(PUBLIC, '.' + path);
   if (!file.startsWith(PUBLIC + sep)) {
