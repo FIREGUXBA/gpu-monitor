@@ -1,6 +1,6 @@
 import { mkdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { app, BrowserWindow, dialog, Menu, nativeImage, protocol, session, Tray } from 'electron';
+import { app, BrowserWindow, dialog, Menu, nativeImage, nativeTheme, protocol, session, Tray } from 'electron';
 import { migrateSourceData } from './migrate.mjs';
 
 const mac = process.platform === 'darwin';
@@ -76,6 +76,15 @@ if (!app.requestSingleInstanceLock()) {
 
   const startup = (async () => {
     await app.whenReady();
+    const appIcon = join(app.getAppPath(), 'public', 'gpu-monitor.png');
+    if (mac && !app.isPackaged) {
+      const updateDockIcon = () => {
+        const appearance = nativeTheme.shouldUseDarkColors ? 'Dark' : 'Default';
+        app.dock.setIcon(join(app.getAppPath(), 'packaging', 'icons', `mac-${appearance}.png`));
+      };
+      updateDockIcon();
+      nativeTheme.on('updated', updateDockIcon);
+    }
     await migrateSourceData(app.isPackaged ? null : join(app.getAppPath(), 'data'), dataDir);
     process.env.GPU_MONITOR_DATA_DIR = dataDir;
     const monitor = await import('./server.mjs');
@@ -96,6 +105,7 @@ if (!app.requestSingleInstanceLock()) {
 
     window = new BrowserWindow({
       title: 'GPU Monitor',
+      icon: appIcon,
       width: 1400,
       height: 960,
       minWidth: 680,

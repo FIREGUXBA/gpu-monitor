@@ -1,0 +1,23 @@
+{
+  "groups": [
+    {
+      "layers": [
+        {
+          "image-name": "chip.png",
+          "name": "GPU and load trace"
+        }
+      ],
+      "name": "Chip",
+      "shadow": {
+        "kind": "layer-color",
+        "opacity": 0.25
+      },
+      "specular": false
+    }
+  ],
+  "supported-platforms": {
+    "squares": [
+      "macOS"
+    ]
+  }
+}

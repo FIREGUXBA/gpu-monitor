@@ -20,7 +20,8 @@ function run(command, args, cwd) {
 try {
   await mkdir(join(source, 'public'), { recursive: true });
   for (const file of ['desktop.mjs', 'migrate.mjs', 'server.mjs', 'package.json', 'package-lock.json',
-    'public/index.html', 'public/app.css', 'public/app.js', 'public/charts.js']) {
+    'public/index.html', 'public/app.css', 'public/app.js', 'public/charts.js',
+    'public/favicon.png', 'public/gpu-monitor.png']) {
     await copyFile(file, join(source, file));
   }
   run('npm', ['ci', '--omit=dev', '--omit=optional', '--ignore-scripts', '--no-audit', '--no-fund'], source);
@@ -31,6 +32,7 @@ try {
     dir: source,
     out: staging,
     name,
+    icon: resolve('packaging/icons/gpu-monitor'),
     platform,
     arch,
     electronVersion: pkg.devDependencies.electron,
