@@ -293,11 +293,15 @@
     const total = data.gpus.reduce((s, g) => s + fmt.gbTenth(g.memTotal || 0), 0).toFixed(1);
     const utils = data.gpus.map((g) => g.util).filter((v) => v != null);
     const avg = utils.length ? Math.round(utils.reduce((s, v) => s + v, 0) / utils.length) : null;
+    const idle = data.configured === false;
     setText($('#kpiMem'), data.gpus.length ? used : '—');
     setText($('#kpiMemSub'), data.gpus.length ? `/ ${total} GB` : '');
     setText($('#kpiUtil'), avg == null ? '—' : String(avg));
-    setText($('#kpiTasks'), String(data.tasks.length));
-    setText($('#kpiUsers'), String(data.users.length));
+    setText($('#kpiUtil').nextElementSibling, idle ? '' : '%');
+    setText($('#kpiTasks'), idle ? '—' : String(data.tasks.length));
+    setText($('#kpiTasks').nextElementSibling, idle ? '' : '个进程');
+    setText($('#kpiUsers'), idle ? '—' : String(data.users.length));
+    setText($('#kpiUsers').nextElementSibling, idle ? '' : '位');
   }
 
   /* ---------- tasks ---------- */
@@ -354,9 +358,11 @@
     if (!tasks.length) {
       const empty = document.createElement('li');
       empty.className = 'empty';
-      empty.textContent = state.gpu == null
-        ? '这台机器上现在没有 GPU 进程。'
-        : `GPU ${state.gpu} 上现在没有任务。`;
+      empty.textContent = state.data?.configured === false
+        ? '尚未选择服务器，点左下角「登录」选择一台。'
+        : state.gpu == null
+          ? '这台机器上现在没有 GPU 进程。'
+          : `GPU ${state.gpu} 上现在没有任务。`;
       ol.appendChild(empty);
     }
   }
@@ -389,7 +395,9 @@
     if (!users.length) {
       const empty = document.createElement('li');
       empty.className = 'empty';
-      empty.textContent = '现在没有用户占用 GPU。';
+      empty.textContent = state.data?.configured === false
+        ? '尚未选择服务器。'
+        : '现在没有用户占用 GPU。';
       list.appendChild(empty);
       return;
     }
@@ -456,6 +464,15 @@
   }
 
   function renderTasksView(data) {
+    if (data.configured === false) {
+      setText($('#tasksFinding'), '尚未选择服务器。');
+      setText($('#tasksFoot'), '');
+      $('#tasksFoot').hidden = true;
+      renderFilterTabs(data);
+      renderTaskList($('#taskListFull'), [], true);
+      return;
+    }
+    $('#tasksFoot').hidden = false;
     const tasks = state.gpu == null ? data.tasks : data.tasks.filter((t) => t.gpu === state.gpu);
     const used = fmt.gbSum(tasks);
     const gpusUsed = new Set(tasks.map((t) => t.gpu)).size;
@@ -481,9 +498,9 @@
   function syncConnectButton() {
     const c = state.data?.connection;
     const btn = $('#connectBtn');
-    const label = c?.mode === 'password'
+    const label = c?.mode === 'password' && c.host
       ? `已登录 ${c.user}@${c.host}:${c.port}，点击切换`
-      : c?.mode === 'key'
+      : c?.mode === 'key' && c.host
         ? `免密连接 ${c.host}，点击切换`
         : '登录 SSH';
     btn.title = label;
@@ -493,11 +510,13 @@
   /* ---------- stamp / notice ---------- */
   function renderStamp() {
     const d = state.data;
-    const text = !d?.sampledAt
-      ? (state.failed ? '连接中断' : '正在连接…')
-      : state.paused
-        ? `已暂停 · 数据停在 ${fmt.clock(d.sampledAt)}`
-        : `更新于 ${fmt.clock(d.sampledAt)}`;
+    const text = d?.configured === false
+      ? '未连接'
+      : !d?.sampledAt
+        ? (state.failed ? '连接中断' : '正在连接…')
+        : state.paused
+          ? `已暂停 · 数据停在 ${fmt.clock(d.sampledAt)}`
+          : `更新于 ${fmt.clock(d.sampledAt)}`;
     setText($('#stamp'), text);
     setText($('#stamp2'), text);
     document.body.classList.toggle('paused', state.paused);
@@ -520,9 +539,11 @@
     syncConnectButton();
     const overview = state.route === 'overview';
     if (overview) {
-      setText($('#scope'), data.host
-        ? `${data.host} · ${data.gpus.length} × ${(data.gpus[0]?.name || 'GPU')}`
-        : `正在连接 ${data.target || '服务器'}…`);
+      setText($('#scope'), data.configured === false
+        ? '未选择服务器'
+        : data.host
+          ? `${data.host} · ${data.gpus.length} × ${(data.gpus[0]?.name || 'GPU')}`
+          : `正在连接 ${data.target || '服务器'}…`);
       setText($('#rack-h'), data.gpus.length ? `${data.gpus.length} 张卡` : '显卡');
     }
     data.gpus.forEach((g) => {
@@ -540,6 +561,7 @@
 
   /* ---------- polling ---------- */
   let timer = null;
+  let prompted = false;
   async function fetchState() {
     try {
       const res = await fetch('/api/state', { cache: 'no-store' });
@@ -552,6 +574,10 @@
       else if (!data.error) $('#notice').hidden = true;
       else showNotice();
       render(data);
+      if (data.configured === false && !prompted) {
+        prompted = true;
+        openConnect();
+      }
     } catch {
       state.failed = true;
       showNotice();
@@ -714,9 +740,11 @@
     connectError.hidden = true;
     trustFp.checked = false;
     connectClear.hidden = !state.data?.saved;
-    setText($('#connectStatus'), pwd
-      ? `当前：${pwd.user}@${pwd.host}:${pwd.port}（账号密码）`
-      : `当前：${c?.host || state.data?.target || ''}（SSH 配置，免密）`);
+    setText($('#connectStatus'), !c?.host
+      ? '尚未登录，选择一台服务器开始监控'
+      : pwd
+        ? `当前：${pwd.user}@${pwd.host}:${pwd.port}（账号密码）`
+        : `当前：${c.host}（SSH 配置，免密）`);
     setConnectMode(pwd ? 'password' : 'key');
     void loadSshHosts();
     connectDialog.showModal();
@@ -782,14 +810,14 @@
   });
 
   connectClear.addEventListener('click', async () => {
-    if (!confirm('清除已保存的 SSH 登录，回到默认服务器？')) return;
+    if (!confirm('清除已保存的登录？')) return;
     connectClear.disabled = true;
     try {
       const res = await fetch('/api/connection', { method: 'DELETE' });
       if (!res.ok) throw new Error('clear failed');
       connectDialog.close();
       await fetchState();
-      live('已回到默认服务器');
+      live('已清除登录');
     } catch {
       showConnectError('清除失败，请稍后重试');
     } finally {

@@ -14,7 +14,7 @@ const HISTORY_DEFAULT = join(DATA_DIR, 'history.jsonl');
 const CONN_FILE = join(DATA_DIR, 'connection.json');
 const PORT = Number(process.env.PORT || 8787);
 const HOST = process.env.HOST || '127.0.0.1';
-const SSH_HOST = process.env.SSH_HOST || 'zhichen-server';
+const SSH_HOST = process.env.SSH_HOST || '';
 const POLL_MS = 2000;
 const KEEP = 1100;
 const RETAIN_MS = 24 * 3600 * 1000;
@@ -69,10 +69,12 @@ let switching = false;
 let generation = 0;
 let historyFile = HISTORY_DEFAULT;
 
-const keyTarget = () => (active.mode === 'key' && active.host) || SSH_HOST;
+const keyTarget = () => (active.mode === 'key' && active.host) || SSH_HOST || null;
+
+const currentTarget = () => (active.mode === 'password' ? active.host : keyTarget());
 
 const targetLabel = () =>
-  active.mode === 'password' ? `${active.user}@${active.host}:${active.port}` : keyTarget();
+  active.mode === 'password' ? `${active.user}@${active.host}:${active.port}` : keyTarget() || '未选择服务器';
 
 const accountKey = (cfg) => `${cfg.user}@${cfg.host}:${cfg.port}`;
 
@@ -656,6 +658,13 @@ async function loop() {
     setTimeout(loop, 250);
     return;
   }
+  if (!currentTarget()) {
+    // 没有默认服务器：等用户在界面里选一台，不反复试连
+    snapshot = null;
+    lastError = null;
+    setTimeout(loop, 1000);
+    return;
+  }
   const started = Date.now();
   const gen = generation;
   try {
@@ -866,25 +875,28 @@ const server = createServer(async (req, res) => {
   };
 
   if (url.pathname === '/api/state') {
+    const configured = Boolean(currentTarget());
     const body = snapshot
       ? {
           ...snapshot,
           error: lastError,
           lastGoodAt,
+          configured,
           mode: active.mode,
           saved: savedConfig,
           connection: connectionInfo(),
         }
       : {
-          target: targetLabel(),
+          target: configured ? targetLabel() : null,
           host: null,
           sampledAt: null,
           gpus: [],
           tasks: [],
           users: [],
           history,
-          error: '正在采样…',
+          error: configured ? '正在采样…' : null,
           pollMs: POLL_MS,
+          configured,
           mode: active.mode,
           saved: savedConfig,
           connection: connectionInfo(),
@@ -898,7 +910,7 @@ const server = createServer(async (req, res) => {
       sendJson(405, { error: 'method not allowed' });
       return;
     }
-    sendJson(200, { default: SSH_HOST, hosts: await sshHostAliases() });
+    sendJson(200, { default: SSH_HOST || null, hosts: await sshHostAliases() });
     return;
   }
 
@@ -979,4 +991,5 @@ server.on('error', (err) => {
 });
 server.listen(PORT, HOST, () => {
   console.log(`GPU 监控（${targetLabel()}）: http://${HOST}:${PORT}`);
+  if (!currentTarget()) console.log('尚未选择服务器，请在页面左下角「登录」中选择一台。');
 });

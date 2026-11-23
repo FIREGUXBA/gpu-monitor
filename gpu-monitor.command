@@ -45,6 +45,6 @@ if [ ! -d node_modules ] || [ ! -d node_modules/ssh2 ]; then
   fi
 fi
 
-echo "正在启动 GPU 监控（SSH: ${SSH_HOST:-zhichen-server}）…"
+echo "正在启动 GPU 监控…"
 ( sleep 1.5; open "$URL" ) &
 exec node server.mjs
