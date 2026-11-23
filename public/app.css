@@ -219,10 +219,12 @@ body.paused .live .dot { background: var(--faint); }
 .range-tabs .num, .gpu-tabs .num { font-size: inherit; }
 
 .gpu-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--gap); }
+.gpu-cell { position: relative; min-width: 0; }
 .gpu-card {
   position: relative;
   display: block;
   width: 100%;
+  height: 100%;
   padding: var(--card-pad);
   border: 1px solid var(--card-edge);
   border-radius: var(--radius-card);
@@ -266,6 +268,42 @@ body.paused .live .dot { background: var(--faint); }
   transition: width 320ms var(--ease-out);
 }
 .gpu-meta { margin-top: 9px; color: var(--faint); font-size: var(--fs-small); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* the expand control rides the card's top-right corner, so it never covers the utilisation figure */
+.expand {
+  position: absolute;
+  top: -11px;
+  right: -11px;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: var(--text);
+  color: var(--ground);
+  cursor: pointer;
+  opacity: 0;
+  visibility: hidden;
+  transform: scale(0.86);
+  /* visibility flips as soon as the cell is hovered or focused, and only after the fade on the way out */
+  transition: opacity var(--t-hover) ease, transform var(--t-hover) var(--ease-out), visibility 0s var(--t-hover);
+}
+.expand .icon { width: 13px; height: 13px; }
+.gpu-cell:hover .expand, .gpu-cell:focus-within .expand {
+  opacity: 1;
+  visibility: visible;
+  transform: none;
+  transition: opacity var(--t-hover) ease, transform var(--t-hover) var(--ease-out), visibility 0s;
+}
+.expand:hover { opacity: 0.85; }
+@media (hover: none) {
+  /* no hover to reveal it, so it stays put with a 40px touch target around the 26px mark */
+  .expand { width: 40px; height: 40px; top: -14px; right: -14px; background: none; opacity: 1; visibility: visible; transform: none; transition: none; }
+  .expand::before { content: ""; position: absolute; inset: 7px; border-radius: 50%; background: var(--text); }
+  .expand .icon { position: relative; }
+}
 
 /* ---------- panels ---------- */
 .panel { background: var(--surface); border: 1px solid var(--card-edge); border-radius: var(--radius-card); padding: var(--card-pad); min-width: 0; }
@@ -468,6 +506,11 @@ body.paused .live .dot { background: var(--faint); }
   box-shadow: 0 24px 64px rgba(0, 0, 0, 0.42); /* taste-skill-ignore: a dialog floats above the page */
 }
 .modal::backdrop { background: rgba(0, 0, 0, 0.55); }
+.modal.detail { width: min(92vw, 880px); }
+.detail-block { display: grid; gap: 4px; }
+/* the utilisation line keeps the page's one hue; the memory bars stay ink */
+#gpuChart { --chart-1: var(--accent); }
+.detail-label { color: var(--muted); font-size: var(--fs-small); }
 .modal-card { display: grid; gap: 16px; padding: 22px; }
 .modal-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
 .modal-head h2 { font-size: 18px; line-height: 24px; font-weight: 600; }

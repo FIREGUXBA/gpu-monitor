@@ -69,7 +69,9 @@
       grid.textContent = '';
       state.cards.clear();
       for (const g of gpus) {
-        const card = document.createElement('article');
+        const cell = document.createElement('article');
+        cell.className = 'gpu-cell';
+        const card = document.createElement('div');
         card.className = 'gpu-card';
         card.setAttribute('role', 'button');
         card.setAttribute('tabindex', '0');
@@ -80,6 +82,14 @@
           <div class="spark"></div>
           <div class="gpu-mem"><div class="line"><span>显存</span><span class="num"></span></div><div class="track"><span></span></div></div>
           <p class="gpu-meta num"></p>`;
+        // the expand control sits outside the card's button role, so it is a real button, not a nested one
+        const expand = document.createElement('button');
+        expand.type = 'button';
+        expand.className = 'expand';
+        expand.innerHTML = `<svg class="icon" aria-hidden="true"><use href="#i-expand"/></svg>`;
+        expand.setAttribute('aria-label', `放大查看 GPU ${g.index}`);
+        expand.title = '放大查看';
+        expand.addEventListener('click', () => openDetail(g.index));
         const toggle = () => {
           state.gpu = state.gpu === g.index ? null : g.index;
           if (state.data) render(state.data);
@@ -94,8 +104,9 @@
           spark._hovered = false;
           if (state.data) drawSparks(state.data);
         });
+        cell.append(card, expand);
         state.cards.set(g.index, card);
-        grid.appendChild(card);
+        grid.appendChild(cell);
       }
     }
   }
@@ -134,20 +145,23 @@
     const plot = Math.max(120, (width || 240) - 52);
     const count = Math.max(24, Math.min(90, Math.floor(plot / 6)));
     const size = Math.max(1, Math.ceil(n / count));
-    const labels = [], mean = [];
+    const labels = [], mean = [], mem = [];
     for (let i = start; i < t.length; i += size) {
-      let sum = 0, seen = 0, at = null;
+      let sum = 0, seen = 0, at = null, memSum = 0, memSeen = 0;
       for (let k = i; k < Math.min(i + size, t.length); k++) {
         const v = hist.util[pos]?.[k];
         if (v == null) continue;
         if (at == null) at = t[k];
         sum += v; seen++;
+        const m = hist.mem?.[pos]?.[k];
+        if (m != null) { memSum += m; memSeen++; }
       }
       if (!seen) continue;
       labels.push(fmt.hhmm(at));
       mean.push(sum / seen);
+      mem.push(memSeen ? memSum / memSeen / 1024 : null);
     }
-    return labels.length ? { labels, mean } : null;
+    return labels.length ? { labels, mean, mem } : null;
   }
 
   function minutePicks(labels, width) {
@@ -189,6 +203,87 @@
         xAt: minutePicks(buckets.labels, el.clientWidth),
       });
     });
+  }
+
+  /* ---------- GPU detail: the card opens into its own charts ---------- */
+  const gpuDialog = $('#gpuDialog');
+  let detailGpu = null;
+
+  function drawDetail() {
+    const data = state.data;
+    const pos = data ? data.gpus.findIndex((g) => g.index === detailGpu) : -1;
+    if (pos < 0) return;
+    const g = data.gpus[pos];
+    const lineEl = $('#gpuChart'), barEl = $('#gpuMemChart');
+    const b = bucketHistory(data, pos, lineEl.clientWidth);
+    if (!b) return;
+    setText($('#gpuDetailTitle'), `GPU ${g.index}`);
+    setText($('#gpuDetailSub'), `${g.name} · 利用率 ${g.util ?? '—'}% · 显存 ${fmt.gb(g.memUsed || 0)} / ${fmt.gb(g.memTotal || 0)} GB · ${g.temp ?? '—'}°C`);
+    // memory history only starts with the first sample recorded after this version, so the bars keep their place
+    // on the time axis and simply leave the earlier buckets empty
+    const withMem = b.mem.some((v) => v != null);
+    Charts.line(lineEl, {
+      labels: b.labels,
+      series: [{ name: '利用率', values: b.mean }],
+      fill: true,
+      format: (v) => `${Math.round(v)}%`,
+      tickFormat: (v) => `${v}%`,
+      height: 200,
+      yTicks: [0, 50, 100],
+      min: 0,
+      max: 100,
+      xAt: withMem ? [] : minutePicks(b.labels, lineEl.clientWidth),
+    });
+    $('#gpuMemBlock').hidden = !withMem;
+    if (!withMem) return;
+    Charts.bars(barEl, {
+      labels: b.labels,
+      values: b.mem,
+      format: (v) => (v == null ? '—' : `${v.toFixed(1)} GB`),
+      tickFormat: (v) => `${v}`,
+      height: 128,
+      xAt: minutePicks(b.labels, barEl.clientWidth),
+    });
+  }
+
+  function openDetail(index) {
+    const card = state.cards.get(index);
+    const from = card ? card.getBoundingClientRect() : null;
+    detailGpu = index;
+    gpuDialog.showModal();
+    drawDetail();
+    // grow out of the card the visitor clicked, so the two read as one surface
+    if (from && !matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      const to = gpuDialog.getBoundingClientRect();
+      gpuDialog.animate([
+        { transformOrigin: 'top left', transform: `translate(${from.left - to.left}px, ${from.top - to.top}px) scale(${from.width / to.width}, ${from.height / to.height})`, opacity: 0.6 },
+        { transformOrigin: 'top left', transform: 'none', opacity: 1 },
+      ], { duration: 320, easing: 'cubic-bezier(.22,1,.36,1)' });
+    }
+  }
+
+  // the same morph in reverse: the panel folds back into the card it came from
+  let closing = false;
+  function closeDetail() {
+    if (!gpuDialog.open || closing) return;
+    const card = state.cards.get(detailGpu);
+    if (!card || matchMedia('(prefers-reduced-motion: reduce)').matches) { gpuDialog.close(); return; }
+    const from = gpuDialog.getBoundingClientRect(), to = card.getBoundingClientRect();
+    closing = true;
+    gpuDialog.animate([
+      { transformOrigin: 'top left', transform: 'none', opacity: 1 },
+      { transformOrigin: 'top left', transform: `translate(${to.left - from.left}px, ${to.top - from.top}px) scale(${to.width / from.width}, ${to.height / from.height})`, opacity: 0 },
+    ], { duration: 220, easing: 'cubic-bezier(.4, 0, .9, .55)' }).onfinish = () => { closing = false; gpuDialog.close(); };
+  }
+
+  $('#gpuDetailClose').addEventListener('click', closeDetail);
+  gpuDialog.addEventListener('click', (e) => { if (e.target === gpuDialog) closeDetail(); });
+  // closedby="none" on the dialog keeps Esc from closing it before the fold-back can run
+  gpuDialog.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.preventDefault(); closeDetail(); } });
+  gpuDialog.addEventListener('close', () => { detailGpu = null; closing = false; });
+  for (const el of [$('#gpuChart'), $('#gpuMemChart')]) {
+    el.addEventListener('pointerenter', () => { el._hovered = true; });
+    el.addEventListener('pointerleave', () => { el._hovered = false; if (gpuDialog.open) drawDetail(); });
   }
 
   /* ---------- kpis ---------- */
@@ -440,6 +535,7 @@
     renderMachine(data);
     renderTasksView(data);
     drawSparks(data);
+    if (gpuDialog.open && detailGpu != null && !$('#gpuChart')._hovered && !$('#gpuMemChart')._hovered) drawDetail();
   }
 
   /* ---------- polling ---------- */

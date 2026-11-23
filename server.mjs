@@ -450,7 +450,7 @@ function parseGpus(lines) {
     .sort((a, b) => a.index - b.index);
 }
 
-const history = { step: POLL_MS, t: [], util: [] };
+const history = { step: POLL_MS, t: [], util: [], mem: [] };
 let snapshot = null;
 let lastError = null;
 let lastGoodAt = null;
@@ -464,12 +464,14 @@ function trimHistory() {
   const drop = history.t.length - KEEP;
   history.t.splice(0, drop);
   history.util.forEach((a) => a.splice(0, Math.min(drop, a.length)));
+  history.mem.forEach((a) => a.splice(0, Math.min(drop, a.length)));
 }
 
 async function loadHistory(file) {
   historyFile = file;
   history.t.length = 0;
   history.util.length = 0;
+  history.mem.length = 0;
   try {
     const raw = await readFile(file, 'utf8');
     const now = Date.now();
@@ -490,6 +492,9 @@ async function loadHistory(file) {
       if (row.t < memCutoff) continue;
       while (history.util.length < row.util.length) history.util.push([]);
       row.util.forEach((v, i) => history.util[i].push(num(v)));
+      // rows written before memory was recorded keep their slot, so both series stay aligned with t
+      while (history.mem.length < row.util.length) history.mem.push([]);
+      row.util.forEach((v, i) => history.mem[i].push(num(row.mem?.[i])));
       history.t.push(row.t);
     }
     trimHistory();
@@ -518,10 +523,10 @@ async function compactHistory(file = historyFile) {
   }
 }
 
-async function persistHistory(t, util, file = historyFile) {
+async function persistHistory(t, util, mem, file = historyFile) {
   try {
     await mkdir(DATA_DIR, { recursive: true });
-    await appendFile(file, JSON.stringify({ t, util }) + '\n');
+    await appendFile(file, JSON.stringify({ t, util, mem }) + '\n');
     appendCount++;
     if (appendCount >= COMPACT_EVERY) {
       appendCount = 0;
@@ -618,12 +623,14 @@ async function sample(gen) {
 
   const now = Date.now();
   const utils = gpus.map((g) => g.util);
+  const mems = gpus.map((g) => g.memUsed);
   history.t.push(now);
   while (history.util.length < gpus.length) history.util.push([]);
-  gpus.forEach((g, i) => history.util[i].push(g.util));
+  while (history.mem.length < gpus.length) history.mem.push([]);
+  gpus.forEach((g, i) => { history.util[i].push(g.util); history.mem[i].push(g.memUsed); });
   trimHistory();
   if (gen !== generation) return;
-  await persistHistory(now, utils, historyFile);
+  await persistHistory(now, utils, mems, historyFile);
   if (gen !== generation) return;
 
   snapshot = {

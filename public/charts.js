@@ -327,9 +327,22 @@
       notesUnder(g, el, N, { padT, h, padB });
       for (const it of N.items) if (it.at != null && values[it.at] != null) it.end = y(values[it.at]) - 4;
       const main = colour || css(el, '--chart-1', '#2f6fdf'), muted = mutedColour || css(el, '--chart-muted', '#c9c9c9');
-      values.forEach((v, i) => { const r = svg('rect', { x: x(i) - bw / 2, y: y(v), width: bw, height: Math.max(0, y(0) - y(v)), fill: lit(i) ? main : muted, opacity: dim.includes(i) ? 0.45 : null, 'shape-rendering': 'crispEdges' }, g); titled(r, `${labels[i]}: ${format(v)}`, {}); });
+      values.forEach((v, i) => svg('rect', { x: x(i) - bw / 2, y: y(v), width: bw, height: Math.max(0, y(0) - y(v)), fill: lit(i) ? main : muted, opacity: dim.includes(i) ? 0.45 : null, 'shape-rendering': 'crispEdges' }, g));
       references(g, el, reference, { y, padL, w, boxes: values.map((v, i) => ({ x0: x(i) - bw / 2, x1: x(i) + bw / 2, y0: y(v), y1: y(0) })) });
       notesOver(g, el, N, { padT, h, padB });
+      // hover: the same bare tooltip as the line charts, so a bar reads its own label and value
+      const tip = tooltip(el);
+      const hit = svg('rect', { x: padL, y: padT, width: w - padL, height: h - padT - padB, fill: 'transparent' }, s);
+      hit.addEventListener('pointermove', (ev) => {
+        const r = s.getBoundingClientRect(), px = ((ev.clientX - r.left) / r.width) * w;
+        const i = Math.max(0, Math.min(values.length - 1, Math.floor((px - padL) / band)));
+        if (values[i] == null) { tip.style.opacity = 0; return; }
+        tip.innerHTML = `<div style="opacity:.7">${esc(labels[i])}</div><div><b style="font-weight:600">${esc(format(values[i]))}</b></div>`;
+        tip.style.left = `${Math.max(0, Math.min((x(i) / w) * r.width + 12, r.width - tip.offsetWidth - 4))}px`;
+        tip.style.top = '0px';
+        tip.style.opacity = 1;
+      });
+      hit.addEventListener('pointerleave', () => { tip.style.opacity = 0; });
       s.setAttribute('aria-label', `${labels.length} bars from ${labels[0]} to ${labels.at(-1)}; highest ${format(Math.max(...values))}`);
     };
     draw(); watch(el, draw); settle(draw);

@@ -57,6 +57,9 @@
   <symbol id="i-close" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">
     <path d="M6 6l12 12M18 6 6 18" stroke-linecap="round"/>
   </symbol>
+  <symbol id="i-expand" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9">
+    <path d="M9.5 3.5H3.5V9.5M14.5 20.5h6v-6" stroke-linecap="round" stroke-linejoin="round"/>
+  </symbol>
 </svg>
 
 <div class="app">
@@ -259,6 +262,28 @@
       <button type="submit" class="primary-btn" id="connectSubmit">连接并监控</button>
     </footer>
   </form>
+</dialog>
+
+<dialog id="gpuDialog" class="modal detail" closedby="none" aria-labelledby="gpuDetailTitle">
+  <div class="modal-card">
+    <header class="modal-head">
+      <div>
+        <h2 id="gpuDetailTitle">GPU</h2>
+        <p class="modal-sub" id="gpuDetailSub"></p>
+      </div>
+      <button type="button" class="icon-btn" id="gpuDetailClose" aria-label="关闭详情" title="关闭">
+        <svg class="icon" aria-hidden="true"><use href="#i-close"/></svg>
+      </button>
+    </header>
+    <div class="detail-block">
+      <p class="detail-label">利用率 %</p>
+      <div id="gpuChart"></div>
+    </div>
+    <div class="detail-block" id="gpuMemBlock">
+      <p class="detail-label">显存 GB</p>
+      <div id="gpuMemChart"></div>
+    </div>
+  </div>
 </dialog>
 
 <script src="/charts.js"></script>
