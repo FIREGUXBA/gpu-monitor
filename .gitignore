@@ -1,0 +1,16 @@
+# 运行数据：每 2 秒追加一次采样（history.jsonl 及其 .tmp），本地生成，不入库
+data/
+
+# 依赖 / 日志
+node_modules/
+npm-debug.log*
+yarn-error.log*
+
+# 本地环境配置（SSH_HOST、PORT 等）
+.env
+.env.*
+
+# 编辑器与系统文件
+.vscode/
+.idea/
+.DS_Store

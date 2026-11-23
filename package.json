@@ -1,0 +1,8 @@
+{
+  "name": "gpu-monitor",
+  "version": "0.1.0",
+  "private": true,
+  "dependencies": {
+    "ssh2": "^1.17.0"
+  }
+}

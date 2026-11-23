@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GPU 监控</title>
+<script>
+  // 在首次绘制前定好主题：手动选择优先，否则跟随系统，避免闪一下另一套配色
+  (() => {
+    try {
+      const saved = localStorage.getItem('gpu-theme');
+      const theme = saved === 'light' || saved === 'dark'
+        ? saved
+        : matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+      document.documentElement.dataset.theme = theme;
+    } catch {}
+  })();
+</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Public+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<svg style="display:none" aria-hidden="true">
+  <symbol id="i-grid" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+    <rect x="3" y="3" width="7.5" height="7.5" rx="1.5"/><rect x="13.5" y="3" width="7.5" height="7.5" rx="1.5"/>
+    <rect x="3" y="13.5" width="7.5" height="7.5" rx="1.5"/><rect x="13.5" y="13.5" width="7.5" height="7.5" rx="1.5"/>
+  </symbol>
+  <symbol id="i-list" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+    <path d="M4 6h16M4 12h16M4 18h10" stroke-linecap="round"/>
+  </symbol>
+  <symbol id="i-pause" viewBox="0 0 24 24" fill="currentColor">
+    <rect x="7" y="5" width="3.5" height="14" rx="1"/><rect x="13.5" y="5" width="3.5" height="14" rx="1"/>
+  </symbol>
+  <symbol id="i-play" viewBox="0 0 24 24" fill="currentColor">
+    <path d="M8 5.5v13a1 1 0 0 0 1.53.85l10-6.5a1 1 0 0 0 0-1.7l-10-6.5A1 1 0 0 0 8 5.5Z"/>
+  </symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+    <rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" stroke-linecap="round"/>
+  </symbol>
+  <symbol id="i-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+    <path d="M5 12.5 10 17.5 19 7" stroke-linecap="round" stroke-linejoin="round"/>
+  </symbol>
+  <symbol id="i-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+    <circle cx="12" cy="12" r="4"/>
+    <path d="M12 2.8v2.2M12 19v2.2M2.8 12H5M19 12h2.2M5.6 5.6l1.6 1.6M16.8 16.8l1.6 1.6M18.4 5.6l-1.6 1.6M7.2 16.8l-1.6 1.6" stroke-linecap="round"/>
+  </symbol>
+  <symbol id="i-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+    <path d="M20.5 14.8A8.6 8.6 0 0 1 9.2 3.5a8.6 8.6 0 1 0 11.3 11.3Z" stroke-linejoin="round"/>
+  </symbol>
+  <symbol id="i-key" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+    <circle cx="8.5" cy="8.5" r="3.5"/>
+    <path d="m11 11 7.5 7.5M16 16l2-2M13.5 13.5l2-2" stroke-linecap="round"/>
+  </symbol>
+  <symbol id="i-close" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">
+    <path d="M6 6l12 12M18 6 6 18" stroke-linecap="round"/>
+  </symbol>
+</svg>
+
+<div class="app">
+  <aside class="rail">
+    <a class="mark" href="#/" title="GPU 监控" aria-label="GPU 监控，转到总览">
+      <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
+        <rect x="2" y="2" width="9" height="9" rx="2" fill="var(--accent)"/>
+        <rect x="13" y="2" width="9" height="9" rx="2" fill="var(--accent)" opacity=".72"/>
+        <rect x="2" y="13" width="9" height="9" rx="2" fill="var(--accent)" opacity=".72"/>
+        <rect x="13" y="13" width="9" height="9" rx="2" fill="var(--accent)" opacity=".42"/>
+      </svg>
+    </a>
+    <nav class="rail-nav" aria-label="主导航">
+      <a class="rail-link" href="#/" data-nav="overview" aria-label="总览" title="总览">
+        <svg class="icon" aria-hidden="true"><use href="#i-grid"/></svg>
+        <span class="rail-label">总览</span>
+      </a>
+      <a class="rail-link" href="#/tasks" data-nav="tasks" aria-label="任务" title="任务">
+        <svg class="icon" aria-hidden="true"><use href="#i-list"/></svg>
+        <span class="rail-label">任务</span>
+      </a>
+    </nav>
+    <div class="rail-bottom">
+      <button id="connectBtn" class="rail-link rail-btn" type="button" aria-haspopup="dialog" aria-label="登录 SSH" title="登录 SSH">
+        <svg class="icon" aria-hidden="true"><use href="#i-key"/></svg>
+        <span class="rail-label">登录</span>
+      </button>
+      <button id="theme" class="rail-link rail-btn" type="button" aria-label="切换到浅色模式" title="切换到浅色模式">
+        <svg class="icon" aria-hidden="true"><use href="#i-sun"/></svg>
+        <span class="rail-label" id="themeLabel">浅色</span>
+      </button>
+      <button id="pause" class="rail-link rail-btn" type="button" aria-pressed="false" aria-label="暂停刷新" title="暂停刷新">
+        <svg class="icon" aria-hidden="true"><use href="#i-pause"/></svg>
+        <span class="rail-label" id="pauseLabel">暂停</span>
+      </button>
+    </div>
+  </aside>
+
+  <main class="canvas">
+    <div id="notice" class="notice" role="status" hidden>
+      <span id="noticeText">连接中断，显示的可能是旧数据。</span>
+      <button type="button" class="link-btn" id="retry">立即重试</button>
+    </div>
+
+    <!-- 总览 -->
+    <div id="view-overview" class="view">
+      <header class="title-row">
+        <div class="title-main">
+          <h1 id="scope">正在连接…</h1>
+        </div>
+        <div class="stamp-box">
+          <span class="live"><span class="dot" id="liveDot" aria-hidden="true"></span><span id="stamp">正在连接…</span></span>
+        </div>
+      </header>
+
+      <section class="kpis" aria-label="整机概览">
+        <div class="kpi">
+          <div class="kpi-label">显存占用</div>
+          <div class="kpi-value num"><span id="kpiMem">—</span><small id="kpiMemSub"></small></div>
+        </div>
+        <div class="kpi">
+          <div class="kpi-label">平均利用率</div>
+          <div class="kpi-value num"><span id="kpiUtil">—</span><small>%</small></div>
+        </div>
+        <div class="kpi">
+          <div class="kpi-label">运行任务</div>
+          <div class="kpi-value num"><span id="kpiTasks">—</span><small>个进程</small></div>
+        </div>
+        <div class="kpi">
+          <div class="kpi-label">使用用户</div>
+          <div class="kpi-value num"><span id="kpiUsers">—</span><small>位</small></div>
+        </div>
+      </section>
+
+      <section class="rack" aria-labelledby="rack-h">
+        <div class="section-head">
+          <div class="section-title">
+            <h2 id="rack-h">显卡</h2>
+          </div>
+          <div class="range-tabs" role="group" aria-label="折线图时间范围">
+            <button type="button" data-range="5" aria-pressed="false">5 分钟</button>
+            <button type="button" data-range="15" aria-pressed="true">15 分钟</button>
+            <button type="button" data-range="30" aria-pressed="false">30 分钟</button>
+          </div>
+        </div>
+        <div class="gpu-grid" id="gpuGrid"></div>
+      </section>
+
+      <div class="lower">
+        <section class="panel tasks-panel" aria-labelledby="tasks-h">
+          <header>
+            <div class="panel-title">
+              <h2 id="tasks-h">任务</h2>
+              <span class="panel-meta" id="taskMeta">—</span>
+            </div>
+            <div class="panel-actions">
+              <a class="card-link" href="#/tasks" id="tasksLink">全部任务</a>
+            </div>
+          </header>
+          <div class="task-head" aria-hidden="true">
+            <span>用户</span><span>任务</span><span>卡</span><span class="n">显存</span><span class="n">已运行</span><span></span>
+          </div>
+          <ol class="task-list" id="taskList" aria-label="GPU 任务"></ol>
+        </section>
+
+        <div class="side">
+          <section class="panel users-panel" aria-labelledby="users-h">
+            <header>
+              <div class="panel-title">
+                <h2 id="users-h">按用户</h2>
+                <span class="panel-meta">任务显存</span>
+              </div>
+            </header>
+            <ol class="user-list" id="userList"></ol>
+          </section>
+          <section class="panel machine-panel" aria-labelledby="machine-h">
+            <header>
+              <div class="panel-title">
+                <h2 id="machine-h">机器</h2>
+              </div>
+            </header>
+            <dl class="kv" id="machineList"></dl>
+          </section>
+        </div>
+      </div>
+    </div>
+
+    <!-- 任务 -->
+    <div id="view-tasks" class="view" hidden>
+      <header class="title-row">
+        <div class="title-main">
+          <h1>任务</h1>
+          <p class="finding" id="tasksFinding">正在连接…</p>
+        </div>
+        <div class="stamp-box">
+          <span class="live"><span class="dot" aria-hidden="true"></span><span id="stamp2">正在连接…</span></span>
+        </div>
+      </header>
+
+      <div class="filter-row">
+        <div class="gpu-tabs" role="group" aria-label="按显卡筛选任务" id="filterTabs"></div>
+      </div>
+
+      <section class="panel tasks-panel full" aria-label="全部 GPU 任务">
+        <div class="task-head detail" aria-hidden="true">
+          <span>用户</span><span>任务与完整命令</span><span>卡</span><span class="n">显存</span><span class="n">已运行</span><span></span>
+        </div>
+        <ol class="task-list detail" id="taskListFull"></ol>
+        <p class="panel-foot" id="tasksFoot">—</p>
+      </section>
+    </div>
+  </main>
+</div>
+
+<dialog id="connectDialog" class="modal" aria-labelledby="connectTitle">
+  <form class="modal-card" id="connectForm">
+    <header class="modal-head">
+      <div>
+        <h2 id="connectTitle">登录 SSH</h2>
+        <p class="modal-sub" id="connectStatus"></p>
+      </div>
+      <button type="button" class="icon-btn" id="connectClose" aria-label="关闭登录弹窗" title="关闭">
+        <svg class="icon" aria-hidden="true"><use href="#i-close"/></svg>
+      </button>
+    </header>
+    <div class="field-grid">
+      <label>主机 / IP
+        <input id="cHost" name="host" autocomplete="off" spellcheck="false" placeholder="10.0.0.2 或 hostname" required>
+      </label>
+      <label>端口
+        <input id="cPort" name="port" type="number" inputmode="numeric" min="1" max="65535" value="22" required>
+      </label>
+      <label class="wide">用户名
+        <input id="cUser" name="user" autocomplete="username" spellcheck="false" required>
+      </label>
+      <label class="wide">密码
+        <input id="cPass" name="password" type="password" autocomplete="current-password" required>
+      </label>
+    </div>
+    <p class="modal-note">密码保存在 macOS 钥匙串；未登录时仍默认使用 zhichen-server 免密连接。</p>
+    <p class="modal-error" id="connectError" role="alert" hidden></p>
+    <label class="trust-row" id="trustRow" hidden>
+      <input type="checkbox" id="trustFp"> 信任新的主机指纹并继续
+    </label>
+    <footer class="modal-actions">
+      <button type="button" class="ghost-btn" id="connectClear" hidden>清除登录</button>
+      <button type="submit" class="primary-btn" id="connectSubmit">连接并监控</button>
+    </footer>
+  </form>
+</dialog>
+
+<script src="/charts.js"></script>
+<script src="/app.js"></script>
+<p id="live" class="sr-only" aria-live="polite"></p>
+</body>
+</html>
