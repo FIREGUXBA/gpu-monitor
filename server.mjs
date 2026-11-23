@@ -3,18 +3,23 @@ import { execFile } from 'node:child_process';
 import { appendFile, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { extname, join, resolve, sep } from 'node:path';
+import { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import os from 'node:os';
 import { Client } from 'ssh2';
 
 const ROOT = fileURLToPath(new URL('.', import.meta.url));
 const PUBLIC = join(ROOT, 'public');
-const DATA_DIR = join(ROOT, 'data');
+const IS_MAC = process.platform === 'darwin';
+const IS_WIN = process.platform === 'win32';
+// 桌面入口指定平台数据目录；网页版默认使用项目下的 data/
+const DATA_DIR = process.env.GPU_MONITOR_DATA_DIR ? resolve(process.env.GPU_MONITOR_DATA_DIR) : join(ROOT, 'data');
 const HISTORY_DEFAULT = join(DATA_DIR, 'history.jsonl');
 const CONN_FILE = join(DATA_DIR, 'connection.json');
 const PORT = Number(process.env.PORT || 8787);
 const HOST = process.env.HOST || '127.0.0.1';
 const SSH_HOST = process.env.SSH_HOST || '';
+const SSH_COMMAND = IS_WIN ? join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'OpenSSH', 'ssh.exe') : 'ssh';
 const POLL_MS = 2000;
 const KEEP = 1100;
 const RETAIN_MS = 24 * 3600 * 1000;
@@ -22,10 +27,12 @@ const COMPACT_EVERY = 1800;
 const REMOTE_TIMEOUT = 9000;
 const KC_SERVICE = 'gpu-monitor-ssh';
 
+const DESKTOP = Boolean(process.versions.electron);
+const keyTargets = new Set();
 const controlPathFor = (target) =>
   join(
     os.tmpdir(),
-    `gpu-monitor-${createHash('sha1').update(`${os.userInfo().username}:${target}`).digest('hex').slice(0, 8)}.sock`,
+    `gpu-monitor-${createHash('sha1').update(`${os.userInfo().username}:${target}${DESKTOP ? ':' + process.pid : ''}`).digest('hex').slice(0, 8)}.sock`,
   );
 
 const sshArgsFor = (target) => [
@@ -33,9 +40,10 @@ const sshArgsFor = (target) => [
   '-o', 'ConnectTimeout=8',
   '-o', 'ServerAliveInterval=15',
   '-o', 'ServerAliveCountMax=2',
-  '-o', 'ControlMaster=auto',
-  '-o', `ControlPath=${controlPathFor(target)}`,
-  '-o', 'ControlPersist=120',
+  // Windows 版 OpenSSH 不支持 ControlMaster 的 Unix socket 多路复用，只能每次新建连接
+  ...(IS_WIN
+    ? []
+    : ['-o', 'ControlMaster=auto', '-o', `ControlPath=${controlPathFor(target)}`, '-o', 'ControlPersist=120']),
   '-o', 'LogLevel=ERROR',
   target,
 ];
@@ -95,57 +103,128 @@ const errorWithStatus = (status, message) => {
   return e;
 };
 
-function readJson(req) {
-  return new Promise((res, rej) => {
-    let body = '';
-    req.setEncoding('utf8');
-    req.on('data', (chunk) => {
-      body += chunk;
-      if (body.length > 8192) {
-        rej(errorWithStatus(413, '请求体过大'));
-        req.destroy();
+async function readJson(req) {
+  const reader = req.body?.getReader();
+  const decoder = new TextDecoder();
+  let body = '';
+  if (reader) {
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        body += decoder.decode(value, { stream: true });
+        if (body.length > 8192) {
+          // Keep the HTTP connection open long enough to send the error response.
+          void reader.cancel().catch(() => {});
+          throw errorWithStatus(413, '请求体过大');
+        }
       }
-    });
-    req.on('end', () => {
-      try {
-        res(JSON.parse(body || '{}'));
-      } catch {
-        rej(errorWithStatus(400, '请求格式错误'));
-      }
-    });
-    req.on('error', rej);
-  });
+      body += decoder.decode();
+    } finally {
+      reader.releaseLock();
+    }
+  }
+  try {
+    const input = JSON.parse(body || '{}');
+    if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error();
+    return input;
+  } catch {
+    throw errorWithStatus(400, '请求格式错误');
+  }
 }
 
-/* ---------- 钥匙串与登录配置 ---------- */
+/* ---------- 凭据存储与登录配置 ---------- */
+
+const memSecrets = new Map();
+const secretFile = (account) => join(DATA_DIR, 'secrets', createHash('sha1').update(account).digest('hex'));
 
 function keychain(args) {
   return new Promise((res, rej) => {
-    execFile('security', args, { timeout: 8000, maxBuffer: 1 << 20 }, (err, stdout, stderr) => {
+    execFile('security', args, { timeout: 8000, maxBuffer: 1 << 20 }, (err, _stdout, stderr) => {
       if (err) {
         // 不要回传 err.message，它会包含完整命令行和明文密码
         rej(new Error(String(stderr || '').trim().split('\n')[0] || '钥匙串操作失败'));
       } else {
-        res(String(stdout || ''));
+        res(String(stderr || ''));
       }
     });
   });
 }
 
-async function keychainGet(account) {
+// Windows 没有钥匙串 CLI，用 DPAPI（当前用户）加密后落盘；密码经环境变量传入，不进命令行
+function runPowershell(script, extraEnv) {
+  return new Promise((res, rej) => {
+    execFile(
+      'powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', `$ErrorActionPreference = 'Stop'; ${script}`],
+      { timeout: 8000, maxBuffer: 1 << 20, windowsHide: true, env: { ...process.env, ...extraEnv } },
+      (err, stdout, stderr) => {
+        if (err) {
+          rej(new Error(String(stderr || '').trim().split('\n')[0] || '凭据操作失败'));
+        } else {
+          res(String(stdout || ''));
+        }
+      },
+    );
+  });
+}
+
+async function secretGet(account) {
+  if (IS_WIN) {
+    try {
+      // 以 base64 回传，避免 PowerShell 控制台编码破坏非 ASCII 密码
+      const out = await runPowershell(
+        '$sec = Get-Content -Raw -LiteralPath $env:GM_SECRET_FILE | ConvertTo-SecureString; ' +
+          '$b = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec); ' +
+          'try { $p = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($b) } finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($b) }; ' +
+          '[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($p))',
+        { GM_SECRET_FILE: secretFile(account) },
+      );
+      return Buffer.from(out.trim(), 'base64').toString('utf8');
+    } catch {
+      return null;
+    }
+  }
+  if (!IS_MAC) return memSecrets.get(account) ?? null;
   try {
-    const out = await keychain(['find-generic-password', '-s', KC_SERVICE, '-a', account, '-w']);
-    return out.replace(/\n$/, '');
+    const stderr = await keychain(['find-generic-password', '-s', KC_SERVICE, '-a', account, '-g']);
+    // security -w prints non-ASCII passwords as unmarked hex. -g identifies the encoding.
+    const hex = /^password: 0x([0-9a-f]+)\b/im.exec(stderr);
+    if (hex) return Buffer.from(hex[1], 'hex').toString('utf8');
+    return /^password: "(.*)"$/m.exec(stderr)?.[1] ?? null;
   } catch {
     return null;
   }
 }
 
-async function keychainSet(account, pw) {
+async function secretSet(account, pw) {
+  if (IS_WIN) {
+    await mkdir(join(DATA_DIR, 'secrets'), { recursive: true });
+    await runPowershell(
+      '$sec = ConvertTo-SecureString -String $env:GM_SECRET -AsPlainText -Force; ' +
+        'ConvertFrom-SecureString -SecureString $sec | Set-Content -NoNewline -LiteralPath $env:GM_SECRET_FILE',
+      { GM_SECRET_FILE: secretFile(account), GM_SECRET: pw },
+    );
+    return;
+  }
+  if (!IS_MAC) {
+    memSecrets.set(account, pw);
+    return;
+  }
   await keychain(['add-generic-password', '-U', '-s', KC_SERVICE, '-a', account, '-w', pw]);
 }
 
-async function keychainDelete(account) {
+async function secretDelete(account) {
+  if (IS_WIN) {
+    try {
+      await unlink(secretFile(account));
+    } catch {}
+    return;
+  }
+  if (!IS_MAC) {
+    memSecrets.delete(account);
+    return;
+  }
   try {
     await keychain(['delete-generic-password', '-s', KC_SERVICE, '-a', account]);
   } catch {}
@@ -195,7 +274,7 @@ async function loadConnection() {
     active.fingerprint = typeof cfg.fingerprint === 'string' ? cfg.fingerprint : null;
     historyFile = historyFileFor({ ...active, mode: 'password' });
     savedConfig = true;
-    password = await keychainGet(accountKey(active));
+    password = await secretGet(accountKey(active));
   } catch {}
 }
 
@@ -264,7 +343,7 @@ function getSsh2Client() {
   if (ssh2Client && ssh2Ready) return Promise.resolve(ssh2Client);
   if (ssh2Connecting) return ssh2Connecting;
   ssh2Connecting = (async () => {
-    if (!password) throw new Error('钥匙串中找不到这台服务器的密码，请重新登录');
+    if (!password) throw new Error('系统凭据存储中找不到这台服务器的密码，请重新登录');
     const { client } = await connectSsh2(active, password, active.fingerprint);
     if (active.mode !== 'password') {
       try {
@@ -336,7 +415,7 @@ async function runViaSsh2(script) {
   try {
     return await execSsh2(await getSsh2Client(), script);
   } catch (err) {
-    if (!password || active.mode !== 'password') throw err;
+    if (stopping || !password || active.mode !== 'password') throw err;
     closeSsh2();
     return execSsh2(await getSsh2Client(), script);
   }
@@ -346,7 +425,8 @@ async function runViaSsh2(script) {
 
 const execRemoteKey = (script, target) =>
   new Promise((res, rej) => {
-    execFile('ssh', [...sshArgsFor(target), script], { timeout: REMOTE_TIMEOUT, maxBuffer: 8 << 20 }, (err, stdout, stderr) => {
+    if (DESKTOP && !IS_WIN) keyTargets.add(target);
+    execFile(SSH_COMMAND, [...sshArgsFor(target), script], { timeout: REMOTE_TIMEOUT, maxBuffer: 8 << 20, windowsHide: true }, (err, stdout, stderr) => {
       if (err) {
         const msg = String(stderr || stdout || err.message || err).trim().split('\n')[0];
         const e = new Error(msg || 'ssh 执行失败');
@@ -364,7 +444,7 @@ async function runViaKey(script, target = keyTarget()) {
     return await execRemoteKey(script, target);
   } catch (err) {
     // Mac 睡眠或断网后 ControlMaster 的旧 socket 可能失效，清掉重试一次
-    if (err.exitCode === 255 || err.killed) {
+    if (!stopping && (err.exitCode === 255 || err.killed)) {
       try {
         await unlink(controlPathFor(target));
       } catch {}
@@ -459,7 +539,11 @@ let lastGoodAt = null;
 let cudaVersion = null;
 let cudaPending = false;
 let appendCount = 0;
-let compacting = false;
+let stopping = false;
+let pollTimer;
+let sampling;
+let cudaTask;
+let connectionChange;
 
 function trimHistory() {
   if (history.t.length <= KEEP) return;
@@ -505,8 +589,6 @@ async function loadHistory(file) {
 }
 
 async function compactHistory(file = historyFile) {
-  if (compacting) return;
-  compacting = true;
   try {
     const raw = await readFile(file, 'utf8');
     const cutoff = Date.now() - RETAIN_MS;
@@ -520,9 +602,7 @@ async function compactHistory(file = historyFile) {
     const tmp = file + '.tmp';
     await writeFile(tmp, kept.length ? kept.join('\n') + '\n' : '');
     await rename(tmp, file);
-  } catch {} finally {
-    compacting = false;
-  }
+  } catch {}
 }
 
 async function persistHistory(t, util, mem, file = historyFile) {
@@ -532,7 +612,7 @@ async function persistHistory(t, util, mem, file = historyFile) {
     appendCount++;
     if (appendCount >= COMPACT_EVERY) {
       appendCount = 0;
-      compactHistory(file);
+      await compactHistory(file);
     }
   } catch {}
 }
@@ -650,19 +730,23 @@ async function sample(gen) {
   };
   lastError = null;
   lastGoodAt = now;
-  void ensureCuda(gen);
+  if (!stopping && !cudaPending) cudaTask = ensureCuda(gen);
+}
+
+function schedulePoll(delay) {
+  if (!stopping) pollTimer = setTimeout(() => { sampling = loop(); }, delay);
 }
 
 async function loop() {
   if (switching) {
-    setTimeout(loop, 250);
+    schedulePoll(250);
     return;
   }
   if (!currentTarget()) {
     // 没有默认服务器：等用户在界面里选一台，不反复试连
     snapshot = null;
     lastError = null;
-    setTimeout(loop, 1000);
+    schedulePoll(1000);
     return;
   }
   const started = Date.now();
@@ -675,7 +759,7 @@ async function loop() {
       if (!snapshot) snapshot = errorSnapshot();
     }
   }
-  setTimeout(loop, Math.max(250, POLL_MS - (Date.now() - started)));
+  schedulePoll(Math.max(250, POLL_MS - (Date.now() - started)));
 }
 
 /* ---------- 登录 / 清除 ---------- */
@@ -712,11 +796,11 @@ async function loginPassword(input) {
 
     const oldAccount = active.mode === 'password' ? accountKey(active) : null;
     const newAccount = accountKey(cfg);
-    await keychainSet(newAccount, pw);
+    await secretSet(newAccount, pw);
     try {
       await writeConfigFile({ ...cfg, mode: 'password' });
     } catch (err) {
-      await keychainDelete(newAccount);
+      await secretDelete(newAccount);
       throw err;
     }
 
@@ -737,7 +821,7 @@ async function loginPassword(input) {
     };
     probe.on('close', drop);
     probe.on('error', drop);
-    if (oldAccount && oldAccount !== newAccount) await keychainDelete(oldAccount);
+    if (oldAccount && oldAccount !== newAccount) await secretDelete(oldAccount);
 
     generation++;
     cudaVersion = null;
@@ -783,7 +867,7 @@ async function loginKey(input) {
     active.port = 22;
     active.user = null;
     active.fingerprint = null;
-    if (oldAccount) await keychainDelete(oldAccount);
+    if (oldAccount) await secretDelete(oldAccount);
 
     generation++;
     cudaVersion = null;
@@ -827,8 +911,10 @@ async function logout() {
     const account = active.mode === 'password' ? accountKey(active) : null;
     try {
       await unlink(CONN_FILE);
-    } catch {}
-    if (account) await keychainDelete(account);
+    } catch (err) {
+      if (err.code !== 'ENOENT') throw err;
+    }
+    if (account) await secretDelete(account);
     active.mode = 'key';
     active.host = null;
     active.port = 22;
@@ -848,7 +934,34 @@ async function logout() {
   }
 }
 
-/* ---------- HTTP ---------- */
+/* ---------- 生命周期与共用请求处理 ---------- */
+
+export async function startMonitor() {
+  await loadConnection();
+  await loadHistory(historyFile);
+  schedulePoll(0);
+}
+
+export async function stopMonitor() {
+  stopping = true;
+  clearTimeout(pollTimer);
+  await Promise.allSettled([sampling, cudaTask, connectionChange]);
+  closeSsh2();
+  await Promise.all([...keyTargets].map((target) => new Promise((done) => {
+    execFile('ssh', ['-S', controlPathFor(target), '-O', 'exit', '--', target], { timeout: 1000 }, () => done());
+  })));
+}
+
+async function changeConnection(change) {
+  if (stopping) throw errorWithStatus(503, '监控正在退出');
+  if (connectionChange) throw errorWithStatus(409, '正在处理另一项登录操作');
+  connectionChange = change();
+  try {
+    return await connectionChange;
+  } finally {
+    connectionChange = null;
+  }
+}
 
 const connectionInfo = () =>
   active.mode === 'password'
@@ -866,13 +979,12 @@ const MIME = {
   '.woff2': 'font/woff2',
 };
 
-const server = createServer(async (req, res) => {
-  const url = new URL(req.url, 'http://local');
-
-  const sendJson = (status, body) => {
-    res.writeHead(status, { 'content-type': MIME['.json'], 'cache-control': 'no-store' });
-    res.end(JSON.stringify(body));
-  };
+export async function handleRequest(req) {
+  const url = new URL(req.url);
+  const sendJson = (status, body) => Response.json(body, {
+    status,
+    headers: { 'content-type': MIME['.json'], 'cache-control': 'no-store' },
+  });
 
   if (url.pathname === '/api/state') {
     const configured = Boolean(currentTarget());
@@ -901,29 +1013,24 @@ const server = createServer(async (req, res) => {
           saved: savedConfig,
           connection: connectionInfo(),
         };
-    sendJson(snapshot ? 200 : 503, body);
-    return;
+    return sendJson(snapshot ? 200 : 503, body);
   }
 
   if (url.pathname === '/api/ssh-hosts') {
     if (req.method !== 'GET') {
-      sendJson(405, { error: 'method not allowed' });
-      return;
+      return sendJson(405, { error: 'method not allowed' });
     }
-    sendJson(200, { default: SSH_HOST || null, hosts: await sshHostAliases() });
-    return;
+    return sendJson(200, { default: SSH_HOST || null, hosts: await sshHostAliases() });
   }
 
   if (url.pathname === '/api/connection') {
     if (req.method === 'POST') {
-      if (!/^application\/json\b/.test(req.headers['content-type'] || '')) {
-        sendJson(415, { error: '请使用 application/json' });
-        return;
+      if (!/^application\/json\b/.test(req.headers.get('content-type') || '')) {
+        return sendJson(415, { error: '请使用 application/json' });
       }
       try {
         const input = await readJson(req);
-        const result = await login(input);
-        sendJson(200, result);
+        return sendJson(200, await changeConnection(() => login(input)));
       } catch (err) {
         const body = { error: String(err.message || err) };
         let status = err.status || 502;
@@ -934,62 +1041,72 @@ const server = createServer(async (req, res) => {
         } else if (err.level === 'client-authentication') {
           status = 401;
         }
-        sendJson(status, body);
+        return sendJson(status, body);
       }
-      return;
     }
     if (req.method === 'DELETE') {
       try {
-        sendJson(200, await logout());
+        return sendJson(200, await changeConnection(logout));
       } catch (err) {
-        sendJson(500, { error: String(err.message || err) });
+        return sendJson(err.status || 500, { error: String(err.message || err) });
       }
-      return;
     }
-    sendJson(405, { error: 'method not allowed' });
-    return;
+    return sendJson(405, { error: 'method not allowed' });
   }
 
   if (url.pathname === '/favicon.ico') {
-    res.writeHead(204).end();
-    return;
+    return new Response(null, { status: 204 });
   }
   let path;
   try {
     path = decodeURIComponent(url.pathname);
   } catch {
     // 一个残缺的百分号转义不能把进程带走（未处理的 Promise 拒绝会直接退出）
-    res.writeHead(400, { 'content-type': 'text/plain; charset=utf-8' }).end('bad request');
-    return;
+    return new Response('bad request', { status: 400 });
   }
   if (path === '/') path = '/index.html';
   const file = resolve(PUBLIC, '.' + path);
   if (!file.startsWith(PUBLIC + sep)) {
-    res.writeHead(403).end('forbidden');
-    return;
+    return new Response('forbidden', { status: 403 });
   }
   try {
     const data = await readFile(file);
-    res.writeHead(200, { 'content-type': MIME[extname(file)] || 'application/octet-stream', 'cache-control': 'no-store' });
-    res.end(data);
+    const headers = { 'content-type': MIME[extname(file)] || 'application/octet-stream', 'cache-control': 'no-store' };
+    return new Response(data, { headers });
   } catch {
-    res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
-    res.end('not found');
+    return new Response('not found', { status: 404 });
   }
-});
+}
 
-await loadConnection();
-await loadHistory(historyFile);
-loop();
-server.on('error', (err) => {
-  if (err.code === 'EADDRINUSE') {
-    console.error(`端口 ${PORT} 已被占用，可能监控已经在运行：http://${HOST}:${PORT}`);
-  } else {
-    console.error(err);
-  }
-  process.exit(1);
-});
-server.listen(PORT, HOST, () => {
-  console.log(`GPU 监控（${targetLabel()}）: http://${HOST}:${PORT}`);
-  if (!currentTarget()) console.log('尚未选择服务器，请在页面左下角「登录」中选择一台。');
-});
+if (!DESKTOP && process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  await startMonitor();
+  const server = createServer(async (req, res) => {
+    try {
+      const options = { method: req.method, headers: req.headers };
+      if (req.method === 'POST') {
+        options.body = Readable.toWeb(Readable.from(req.iterator({ destroyOnReturn: false })));
+        options.duplex = 'half';
+      }
+      const request = new Request(new URL(req.url, 'http://local'), options);
+      const response = await handleRequest(request);
+      res.writeHead(response.status, Object.fromEntries(response.headers));
+      res.end(Buffer.from(await response.arrayBuffer()));
+    } catch {
+      if (!res.headersSent) res.writeHead(400);
+      res.end();
+    }
+  });
+
+  server.on('error', (err) => {
+    if (err.code === 'EADDRINUSE') {
+      console.error(`端口 ${PORT} 已被占用，可能监控已经在运行：http://${HOST}:${PORT}`);
+    } else {
+      console.error(err);
+    }
+    process.exit(1);
+  });
+  server.listen(PORT, HOST, () => {
+    console.log(`GPU 监控（${targetLabel()}）: http://${HOST}:${PORT}`);
+    if (!currentTarget()) console.log('尚未选择服务器，请在页面左下角「登录」中选择一台。');
+  });
+}

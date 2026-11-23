@@ -8,6 +8,9 @@
 <script>
   // 在首次绘制前定好主题：手动选择优先，否则跟随系统，避免闪一下另一套配色
   (() => {
+    if (location.protocol === 'gpu-monitor:' && new URLSearchParams(location.search).get('window') === 'mac') {
+      document.documentElement.dataset.window = 'mac';
+    }
     try {
       const saved = localStorage.getItem('gpu-theme');
       const theme = saved === 'light' || saved === 'dark'
@@ -62,6 +65,7 @@
   </symbol>
 </svg>
 
+<div class="window-bar"><span id="windowTitle">GPU 监控</span></div>
 <div class="app">
   <aside class="rail">
     <a class="mark" href="#/" title="GPU 监控" aria-label="GPU 监控，转到总览">

@@ -492,7 +492,9 @@
 
   function syncTitle() {
     const label = state.data?.host || state.data?.target;
-    document.title = state.route === 'tasks' ? '任务 · GPU 监控' : label ? `GPU 监控 · ${label}` : 'GPU 监控';
+    const title = state.route === 'tasks' ? '任务 · GPU 监控' : label ? `GPU 监控 · ${label}` : 'GPU 监控';
+    document.title = title;
+    setText($('#windowTitle'), title);
   }
 
   function syncConnectButton() {
@@ -726,7 +728,7 @@
     trustRow.hidden = true;
     setText($('#modeNote'), mode === 'key'
       ? '从本机 ~/.ssh/config 里选择主机，密钥、端口、用户名都来自该配置。'
-      : '账号密码登录，适合没有配置免密的主机；密码只保存在本机 macOS 钥匙串。');
+      : '账号密码登录，适合没有配置免密的主机；密码只保存在本机的系统凭据存储中。');
   }
 
   function openConnect() {
@@ -880,6 +882,9 @@
 
   $$('.range-tabs button').forEach((b) => b.addEventListener('click', () => setRange(b)));
 
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && !state.paused) fetchState();
+  });
   window.addEventListener('hashchange', applyRoute);
   window.addEventListener('resize', () => { if (state.data) drawSparks(state.data); });
   // follow the system until the switch is used for the first time

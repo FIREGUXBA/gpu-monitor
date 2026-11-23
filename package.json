@@ -4,5 +4,14 @@
   "private": true,
   "dependencies": {
     "ssh2": "^1.17.0"
+  },
+  "devDependencies": {
+    "@electron/packager": "20.3.0",
+    "electron": "45.4.1"
+  },
+  "main": "desktop.mjs",
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test"
   }
 }

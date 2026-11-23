@@ -35,6 +35,7 @@
   --row-height: 42px;
   --nav-row: 34px;
   --sidebar-width: 50px;
+  --window-bar-height: 0px;
   --gap: 24px;
   --pad: 32px;
   --card-pad: 20px;
@@ -101,12 +102,35 @@ a { color: inherit; text-decoration: none; }
 .num { font-family: var(--mono); font-variant-numeric: tabular-nums; letter-spacing: -0.01em; }
 
 /* ---------- shell: icon rail + canvas ---------- */
-.app { display: grid; grid-template-columns: var(--sidebar-width) minmax(0, 1fr); min-height: 100svh; }
+:root[data-window="mac"] { --window-bar-height: max(36px, env(titlebar-area-height, 0px)); }
+.window-bar { display: none; }
+[data-window="mac"] .window-bar {
+  position: sticky;
+  top: 0;
+  z-index: 11;
+  display: flex;
+  align-items: center;
+  height: var(--window-bar-height);
+  padding: 0 16px 0 max(91px, calc(env(titlebar-area-x, 0px) + 5px));
+  background: var(--ground);
+  border-bottom: 1px solid var(--border);
+  color: var(--muted);
+  font-size: var(--fs-small);
+  font-weight: 600;
+  app-region: drag;
+  user-select: none;
+}
+.window-bar span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.app {
+  display: grid;
+  grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
+  min-height: calc(100svh - var(--window-bar-height));
+}
 
 .rail {
   position: sticky;
-  top: 0;
-  height: 100svh;
+  top: var(--window-bar-height);
+  height: calc(100svh - var(--window-bar-height));
   display: flex;
   flex-direction: column;
   align-items: center;

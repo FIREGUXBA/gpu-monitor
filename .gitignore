@@ -16,3 +16,7 @@ yarn-error.log*
 .DS_Store
 # tasteskill 检查产物（截图 / 报告）
 .taste-skill/
+
+# 发行构建产物与下载缓存
+dist/
+.cache/
