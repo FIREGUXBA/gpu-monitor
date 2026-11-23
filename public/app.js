@@ -17,6 +17,9 @@
     gb: (mib) => (mib / 1024).toFixed(1),
     gbUnit: (mib) => `${(mib / 1024).toFixed(1)} GB`,
     gb0: (mib) => `${Math.round(mib / 1024)} GB`,
+    // totals are summed from the figures as they are printed, so a column never disagrees with its total
+    gbTenth: (mib) => Math.round((mib / 1024) * 10) / 10,
+    gbSum: (list, key = 'memMib') => list.reduce((s, item) => s + Math.round(((item[key] || 0) / 1024) * 10) / 10, 0).toFixed(1),
     hhmm: (ts) => {
       const d = new Date(ts);
       return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
@@ -118,22 +121,33 @@
     card.setAttribute('aria-label', `GPU ${g.index}：利用率 ${util}%，显存 ${fmt.gb(g.memUsed)} / ${fmt.gb(total)} GB，温度 ${temp}。${on ? '已选中，点按取消筛选。' : '点按只看这张卡上的任务。'}`);
   }
 
-  function sliceHistory(data, pos) {
+  // the 2-second samples folded into short means: a raw series of 450 points turns a 150px card into a wall of
+  // strokes, while a short-window mean still shows the shape of the load
+  function bucketHistory(data, pos, width) {
     const hist = data.history || { t: [], util: [] };
     const t = hist.t || [];
     const cutoff = (data.sampledAt || Date.now()) - state.range * 60000;
     let start = 0;
     while (start < t.length && t[start] < cutoff) start++;
     const n = t.length - start;
-    if (n <= 0) return { labels: [], values: [] };
-    const stride = Math.max(1, Math.ceil(n / 320));
-    const idx = [];
-    for (let i = start; i < t.length; i += stride) idx.push(i);
-    if (idx.at(-1) !== t.length - 1) idx.push(t.length - 1);
-    return {
-      labels: idx.map((i) => fmt.hhmm(t[i])),
-      values: idx.map((i) => hist.util[pos]?.[i] ?? null),
-    };
+    if (n <= 0) return null;
+    const plot = Math.max(120, (width || 240) - 52);
+    const count = Math.max(24, Math.min(90, Math.floor(plot / 6)));
+    const size = Math.max(1, Math.ceil(n / count));
+    const labels = [], mean = [];
+    for (let i = start; i < t.length; i += size) {
+      let sum = 0, seen = 0, at = null;
+      for (let k = i; k < Math.min(i + size, t.length); k++) {
+        const v = hist.util[pos]?.[k];
+        if (v == null) continue;
+        if (at == null) at = t[k];
+        sum += v; seen++;
+      }
+      if (!seen) continue;
+      labels.push(fmt.hhmm(at));
+      mean.push(sum / seen);
+    }
+    return labels.length ? { labels, mean } : null;
   }
 
   function minutePicks(labels, width) {
@@ -160,30 +174,32 @@
       if (!card) return;
       const el = card.querySelector('.spark');
       if (!el.clientWidth || el._hovered) return;
-      const { labels, values } = sliceHistory(data, pos);
-      if (!values.length) { el.textContent = ''; return; }
+      const buckets = bucketHistory(data, pos, el.clientWidth);
+      if (!buckets) { el.textContent = ''; return; }
       Charts.line(el, {
-        labels,
-        series: [{ name: '利用率', values }],
-        format: (v) => `${v}%`,
+        labels: buckets.labels,
+        series: [{ name: '利用率', values: buckets.mean }],
+        fill: true,
+        format: (v) => `${Math.round(v)}%`,
         tickFormat: (v) => `${v}%`,
-        height: 88,
+        height: Math.round(el.clientHeight) || 88,
         yTicks: [0, 50, 100],
         min: 0,
         max: 100,
-        xAt: minutePicks(labels, el.clientWidth),
+        xAt: minutePicks(buckets.labels, el.clientWidth),
       });
     });
   }
 
   /* ---------- kpis ---------- */
   function renderKpis(data) {
-    const used = data.gpus.reduce((s, g) => s + (g.memUsed || 0), 0);
-    const total = data.gpus.reduce((s, g) => s + (g.memTotal || 0), 0);
+    // both figures come from the per-card values on screen (31.9 + 29.3 + …), never from the unrounded sum
+    const used = data.gpus.reduce((s, g) => s + fmt.gbTenth(g.memUsed || 0), 0).toFixed(1);
+    const total = data.gpus.reduce((s, g) => s + fmt.gbTenth(g.memTotal || 0), 0).toFixed(1);
     const utils = data.gpus.map((g) => g.util).filter((v) => v != null);
     const avg = utils.length ? Math.round(utils.reduce((s, v) => s + v, 0) / utils.length) : null;
-    setText($('#kpiMem'), data.gpus.length ? fmt.gb(used) : '—');
-    setText($('#kpiMemSub'), data.gpus.length ? `/ ${fmt.gb(total)} GB` : '');
+    setText($('#kpiMem'), data.gpus.length ? used : '—');
+    setText($('#kpiMemSub'), data.gpus.length ? `/ ${total} GB` : '');
     setText($('#kpiUtil'), avg == null ? '—' : String(avg));
     setText($('#kpiTasks'), String(data.tasks.length));
     setText($('#kpiUsers'), String(data.users.length));
@@ -252,7 +268,13 @@
 
   function renderTasksOverview(data) {
     const tasks = state.gpu == null ? data.tasks : data.tasks.filter((t) => t.gpu === state.gpu);
-    setText($('#taskMeta'), `${data.tasks.length} 个进程 · ${data.users.length} 位用户`);
+    // the counts already sit in the KPI strip; this line only says which filter is narrowing the list
+    const meta = $('#taskMeta');
+    meta.hidden = state.gpu == null;
+    setText(meta, state.gpu == null ? '' : `只看 GPU ${state.gpu}`);
+    const foot = $('#taskFoot');
+    foot.hidden = !tasks.length;
+    setText(foot, tasks.length ? `运行最久 ${fmt.dur(Math.max(...tasks.map((t) => t.elapsed || 0)))}` : '');
     $('.lower').classList.toggle('filtered', state.gpu != null);
     renderTaskList($('#taskList'), tasks, false);
   }
@@ -260,15 +282,24 @@
   function renderUsers(data) {
     const list = $('#userList');
     list.textContent = '';
-    if (!data.users.length) {
+    // each user's figure is the sum of the memory its rows print, so the panel and the task list agree
+    const byUser = new Map();
+    for (const t of data.tasks) {
+      const row = byUser.get(t.user) || { user: t.user, tasks: 0, mem: 0 };
+      row.tasks += 1;
+      row.mem += fmt.gbTenth(t.memMib || 0);
+      byUser.set(t.user, row);
+    }
+    const users = [...byUser.values()].sort((a, b) => b.mem - a.mem);
+    if (!users.length) {
       const empty = document.createElement('li');
       empty.className = 'empty';
       empty.textContent = '现在没有用户占用 GPU。';
       list.appendChild(empty);
       return;
     }
-    const max = data.users[0].memMib || 1;
-    for (const u of data.users) {
+    const max = users[0].mem || 1;
+    for (const u of users) {
       const li = document.createElement('li');
       li.className = 'user-row';
       li.innerHTML = `
@@ -279,8 +310,8 @@
       li.querySelector('.avatar').textContent = (u.user || '?').slice(0, 1).toUpperCase();
       setText(li.querySelector('.u-name'), u.user);
       setText(li.querySelector('.u-sub'), `${u.tasks} 个任务`);
-      setText(li.querySelector('.u-val'), fmt.gbUnit(u.memMib));
-      li.querySelector('.u-bar > span').style.width = `${Math.round((u.memMib / max) * 100)}%`;
+      setText(li.querySelector('.u-val'), `${u.mem.toFixed(1)} GB`);
+      li.querySelector('.u-bar > span').style.width = `${Math.round((u.mem / max) * 100)}%`;
       list.appendChild(li);
     }
   }
@@ -291,7 +322,7 @@
       ['驱动', g0.driver || '—'],
       ['CUDA', data.cuda || '—'],
       ['MIG', g0.mig === 'Disabled' ? '已禁用' : g0.mig === 'Enabled' ? '已启用' : '—'],
-      ['系统运行', data.uptime ? fmt.dur(data.uptime) : '—'],
+      ['运行时长', data.uptime ? fmt.dur(data.uptime) : '—'],
     ];
     const dl = $('#machineList');
     dl.textContent = '';
@@ -331,11 +362,14 @@
 
   function renderTasksView(data) {
     const tasks = state.gpu == null ? data.tasks : data.tasks.filter((t) => t.gpu === state.gpu);
-    const used = tasks.reduce((s, t) => s + (t.memMib || 0), 0);
+    const used = fmt.gbSum(tasks);
+    const gpusUsed = new Set(tasks.map((t) => t.gpu)).size;
     setText($('#tasksFinding'), state.gpu == null
-      ? `${data.tasks.length} 个进程 · ${data.users.length} 位用户 · 合计 ${fmt.gbUnit(used)} 显存`
-      : `GPU ${state.gpu} 上 ${tasks.length} 个进程 · 合计 ${fmt.gbUnit(used)} 显存`);
-    setText($('#tasksFoot'), `共 ${tasks.length} 个进程`);
+      ? `${data.tasks.length} 个进程 · ${data.users.length} 位用户 · 合计 ${used} GB 显存`
+      : `GPU ${state.gpu} 上 ${tasks.length} 个进程 · 合计 ${used} GB 显存`);
+    setText($('#tasksFoot'), tasks.length
+      ? `共 ${tasks.length} 个进程 · 分布在 ${gpusUsed} 张卡 · 最久 ${fmt.dur(Math.max(...tasks.map((t) => t.elapsed || 0)))}`
+      : '共 0 个进程');
     renderFilterTabs(data);
     renderTaskList($('#taskListFull'), tasks, true);
   }
