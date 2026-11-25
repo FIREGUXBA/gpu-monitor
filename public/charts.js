@@ -1,7 +1,7 @@
 // tasteskill / charts.js — small, dependency-free charts for app screens, drawn in SVG from your data.
 // They follow references/app-screens.md: one question per chart, one series that matters, 3–5 quiet
-// horizontal gridlines, round ticks that top out above the largest value, 2px straight lines with no
-// markers, square bars, no gradients, a bare tooltip, tabular figures. Colours come from CSS variables:
+// horizontal gridlines, round ticks that top out above the largest value, 2px lines, square bars,
+// a bare tooltip, tabular figures. Colours come from CSS variables:
 //   --chart-1 … --chart-4 (series), --chart-muted (other series), --chart-mark (a marked period; ink by default),
 //   --chart-span (the opacity of a shaded span: about .06 on light, .12 on dark), --chart-track (a time strip's track),
 //   --grid, --axis-ink, --ink, --surface, --raised, --rule, --negative
@@ -248,7 +248,18 @@
   function settle(draw) { if (document.fonts && document.fonts.status === 'loading') { document.fonts.ready.then(draw); document.fonts.addEventListener?.('loadingdone', draw, { once: true }); } }
   const heightOf = (h) => (typeof h === 'function' ? h() : h);
 
-  function line(el, { labels, series, format = fmt.int, tickFormat = null, height = 220, fill = false, min, max, step = false, annotations, reference, today = null, todayLabel = 'Today', endLabel = false, yTicks = null, xAt = null, legend = null }) {
+  function smoothPath(points) {
+    return points.map((point, i) => {
+      if (!point) return '';
+      const previous = points[i - 1];
+      if (!previous) return `M${point.join(' ')}`;
+      // Horizontal tangents keep the curve smooth and within the two measured values.
+      const dx = (point[0] - previous[0]) / 3;
+      return `C${previous[0] + dx} ${previous[1]} ${point[0] - dx} ${point[1]} ${point.join(' ')}`;
+    }).join('');
+  }
+
+  function line(el, { labels, series, format = fmt.int, tickFormat = null, height = 220, fill = false, min, max, step = false, smooth = false, colourStops = null, annotations, reference, today = null, todayLabel = 'Today', endLabel = false, yTicks = null, xAt = null, legend = null }) {
     el._fmt = format;
     const colourOf = (sr, k) => sr.colour || (k === 0 ? css(el, '--chart-1', '#2f6fdf') : css(el, `--chart-${k + 1}`, css(el, '--chart-muted', '#a3a3a3')));
     const draw = () => {
@@ -277,11 +288,24 @@
       const g = svg('g', {}, s);
       axes(g, el, { w, h, padL, padB, yt, y, labels, x, at: xAt, tick });
       notesUnder(g, el, N, { padT, h, padB });
+      let gradientStroke;
+      if (colourStops) {
+        const id = `${el.id}-gradient`;
+        const low = colourStops[0][0], high = colourStops.at(-1)[0];
+        const gradient = svg('linearGradient', { id, gradientUnits: 'userSpaceOnUse', x1: 0, x2: 0, y1: y(low), y2: y(high) }, svg('defs', {}, s));
+        for (const [value, colour] of colourStops) {
+          svg('stop', { offset: (value - low) / (high - low), 'stop-color': colour }, gradient);
+        }
+        gradientStroke = `url(#${id})`;
+      }
       series.forEach((sr, k) => {
-        const col = colourOf(sr, k);
+        const col = gradientStroke || colourOf(sr, k);
         const pts = sr.values.map((v, i) => (v == null ? null : [x(i), y(Math.min(v, yt.at(-1)))]));
         // step: a balance that only changes on given days holds its value until the next one
-        const d = pts.reduce((acc, p, i) => (p ? acc + (acc && pts[i - 1] ? (step ? `L${p[0].toFixed(1)} ${pts[i - 1][1].toFixed(1)}L` : 'L') : 'M') + p[0].toFixed(1) + ' ' + p[1].toFixed(1) : acc), '');
+        const d = smooth ? smoothPath(pts) : pts.reduce((acc, p, i) => (p ? acc + (acc && pts[i - 1] ? (step ? `L${p[0].toFixed(1)} ${pts[i - 1][1].toFixed(1)}L` : 'L') : 'M') + p[0].toFixed(1) + ' ' + p[1].toFixed(1) : acc), '');
+        if (smooth) pts.forEach((p, i) => {
+          if (p && !pts[i - 1] && !pts[i + 1]) svg('circle', { cx: p[0], cy: p[1], r: 2, fill: col }, g);
+        });
         if (fill && k === 0) { const first = pts.find(Boolean), last = [...pts].reverse().find(Boolean); svg('path', { d: `${d}L${last[0]} ${y(yt[0])}L${first[0]} ${y(yt[0])}Z`, fill: col, opacity: 0.12 }, g); }
         if (today == null) svg('path', { d, fill: 'none', stroke: col, 'stroke-width': 2, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' }, g);
         else {
@@ -300,7 +324,7 @@
       notesOver(g, el, N, { padT, h, padB });
       // hover: a rule, a dot per series and a bare tooltip
       const tip = tooltip(el), rule = svg('line', { y1: padT, y2: h - padB, stroke: css(el, '--axis-ink', '#6b6b6b'), 'stroke-width': 1, opacity: 0 }, g);
-      const dots = series.map((sr, k) => svg('circle', { r: 3.5, fill: css(el, '--surface', '#fff'), stroke: colourOf(sr, k), 'stroke-width': 2, opacity: 0 }, g));
+      const dots = series.map((sr, k) => svg('circle', { r: 3.5, fill: css(el, '--surface', '#fff'), stroke: gradientStroke || colourOf(sr, k), 'stroke-width': 2, opacity: 0 }, g));
       const hit = svg('rect', { x: padL, y: padT, width: w - padL, height: h - padT - padB, fill: 'transparent' }, s);
       const move = (ev) => { const r = s.getBoundingClientRect(); const px = ((ev.clientX - r.left) / r.width) * w; const i = Math.max(0, Math.min(labels.length - 1, Math.round(((px - padL) / (w - padL - padR)) * (labels.length - 1)))); rule.setAttribute('x1', x(i)); rule.setAttribute('x2', x(i)); rule.setAttribute('opacity', 0.35); series.forEach((sr, k) => { const v = sr.values[i]; dots[k].setAttribute('cx', x(i)); dots[k].setAttribute('cy', v == null ? -99 : y(Math.min(v, yt.at(-1)))); dots[k].setAttribute('opacity', v == null ? 0 : 1); }); tip.innerHTML = `<div style="opacity:.7">${esc(labels[i])}</div>` + series.map((sr) => `<div><b style="font-weight:600">${sr.values[i] == null ? '–' : esc(format(sr.values[i]))}</b> ${series.length > 1 ? esc(sr.name) : ''}</div>`).join(''); const left = Math.min((x(i) / w) * r.width + 12, r.width - tip.offsetWidth - 4); tip.style.left = `${Math.max(0, left)}px`; tip.style.top = '0px'; tip.style.opacity = 1; };
       hit.addEventListener('pointermove', move); hit.addEventListener('pointerleave', () => { tip.style.opacity = 0; rule.setAttribute('opacity', 0); dots.forEach((d) => d.setAttribute('opacity', 0)); });

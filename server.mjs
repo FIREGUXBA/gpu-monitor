@@ -532,7 +532,7 @@ function parseGpus(lines) {
     .sort((a, b) => a.index - b.index);
 }
 
-const history = { step: POLL_MS, t: [], util: [], mem: [] };
+const history = { step: POLL_MS, t: [], util: [], mem: [], temp: [] };
 let snapshot = null;
 let lastError = null;
 let lastGoodAt = null;
@@ -551,6 +551,12 @@ function trimHistory() {
   history.t.splice(0, drop);
   history.util.forEach((a) => a.splice(0, Math.min(drop, a.length)));
   history.mem.forEach((a) => a.splice(0, Math.min(drop, a.length)));
+  history.temp.forEach((a) => a.splice(0, drop));
+}
+
+function appendTemperatures(values, count) {
+  while (history.temp.length < count) history.temp.push(Array(history.t.length).fill(null));
+  history.temp.forEach((series, i) => series.push(num(values?.[i])));
 }
 
 async function loadHistory(file) {
@@ -558,6 +564,7 @@ async function loadHistory(file) {
   history.t.length = 0;
   history.util.length = 0;
   history.mem.length = 0;
+  history.temp.length = 0;
   try {
     const raw = await readFile(file, 'utf8');
     const now = Date.now();
@@ -581,6 +588,7 @@ async function loadHistory(file) {
       // rows written before memory was recorded keep their slot, so both series stay aligned with t
       while (history.mem.length < row.util.length) history.mem.push([]);
       row.util.forEach((v, i) => history.mem[i].push(num(row.mem?.[i])));
+      appendTemperatures(row.temp, row.util.length);
       history.t.push(row.t);
     }
     trimHistory();
@@ -605,10 +613,10 @@ async function compactHistory(file = historyFile) {
   } catch {}
 }
 
-async function persistHistory(t, util, mem, file = historyFile) {
+async function persistHistory(t, util, mem, temp, file = historyFile) {
   try {
     await mkdir(DATA_DIR, { recursive: true });
-    await appendFile(file, JSON.stringify({ t, util, mem }) + '\n');
+    await appendFile(file, JSON.stringify({ t, util, mem, temp }) + '\n');
     appendCount++;
     if (appendCount >= COMPACT_EVERY) {
       appendCount = 0;
@@ -706,13 +714,15 @@ async function sample(gen) {
   const now = Date.now();
   const utils = gpus.map((g) => g.util);
   const mems = gpus.map((g) => g.memUsed);
+  const temps = gpus.map((g) => g.temp);
+  appendTemperatures(temps, gpus.length);
   history.t.push(now);
   while (history.util.length < gpus.length) history.util.push([]);
   while (history.mem.length < gpus.length) history.mem.push([]);
   gpus.forEach((g, i) => { history.util[i].push(g.util); history.mem[i].push(g.memUsed); });
   trimHistory();
   if (gen !== generation) return;
-  await persistHistory(now, utils, mems, historyFile);
+  await persistHistory(now, utils, mems, temps, historyFile);
   if (gen !== generation) return;
 
   snapshot = {

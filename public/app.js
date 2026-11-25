@@ -63,6 +63,8 @@
   }
 
   /* ---------- GPU cards ---------- */
+  const temperatureThresholds = [35, 55, 70, 85];
+
   function ensureCards(gpus) {
     const grid = $('#gpuGrid');
     if (state.cards.size !== gpus.length) {
@@ -77,11 +79,26 @@
         card.setAttribute('tabindex', '0');
         card.setAttribute('aria-pressed', 'false');
         card.dataset.gpu = g.index;
+        const tempGradient = `gpu-temperature-gradient-${state.cards.size}`;
         card.innerHTML = `
           <header class="gpu-head"><h3></h3><span class="gpu-util"><span class="val num"></span><span class="pct">%</span></span></header>
           <div class="spark"></div>
           <div class="gpu-mem"><div class="line"><span>显存</span><span class="num"></span></div><div class="track"><span></span></div></div>
-          <p class="gpu-meta num"></p>`;
+          <p class="gpu-meta num">
+            <span class="gpu-temp"><svg width="11" height="14" viewBox="0 0 11 14" aria-hidden="true">
+              <defs><linearGradient id="${tempGradient}" x1="5.5" y1="13" x2="5.5" y2="1" gradientUnits="userSpaceOnUse">
+                <stop offset="0%" stop-color="#DC2626"/>
+                <stop offset="100%" stop-color="#FB7185"/>
+              </linearGradient></defs>
+              <g fill="url(#${tempGradient})">
+                <rect x="1.5" y="1.2" width="8" height="1.5" rx="0.75"/>
+                <rect x="1.5" y="3.8" width="8" height="1.5" rx="0.75"/>
+                <rect x="1.5" y="6.4" width="8" height="1.5" rx="0.75"/>
+                <rect x="1.5" y="9" width="8" height="1.5" rx="0.75"/>
+                <rect x="1.5" y="11.6" width="8" height="1.5" rx="0.75"/>
+              </g>
+            </svg><span class="gpu-temp-value"></span></span><span class="gpu-meta-rest"></span>
+          </p>`;
         // the expand control sits outside the card's button role, so it is a real button, not a nested one
         const expand = document.createElement('button');
         expand.type = 'button';
@@ -126,7 +143,10 @@
     const temp = g.temp == null ? '—' : `${g.temp}°C`;
     const power = g.power == null ? '—' : `${Math.round(g.power)} W`;
     const limit = g.powerLimit == null ? '—' : `${Math.round(g.powerLimit)} W`;
-    setText(card.querySelector('.gpu-meta'), `${temp} · ${power} / ${limit} · ${clock}`);
+    const temperature = card.querySelector('.gpu-temp');
+    temperature.dataset.level = g.temp == null ? 0 : 1 + temperatureThresholds.filter((threshold) => g.temp >= threshold).length;
+    setText(temperature.querySelector('.gpu-temp-value'), temp);
+    setText(card.querySelector('.gpu-meta-rest'), ` · ${power} / ${limit} · ${clock}`);
     const on = state.gpu === g.index;
     card.setAttribute('aria-pressed', on ? 'true' : 'false');
     card.setAttribute('aria-label', `GPU ${g.index}：利用率 ${util}%，显存 ${fmt.gb(g.memUsed)} / ${fmt.gb(total)} GB，温度 ${temp}。${on ? '已选中，点按取消筛选。' : '点按只看这张卡上的任务。'}`);
@@ -207,7 +227,31 @@
 
   /* ---------- GPU detail: the card opens into its own charts ---------- */
   const gpuDialog = $('#gpuDialog');
+  const tempChart = $('#gpuTempChart');
   let detailGpu = null;
+
+  function drawTemperature(data, pos) {
+    const times = data.history?.t || [];
+    const cutoff = (data.sampledAt || Date.now()) - state.range * 60000;
+    const start = times.findIndex((time) => time >= cutoff);
+    const values = start < 0 ? [] : times.slice(start).map((_, i) => data.history.temp?.[pos]?.[start + i] ?? null);
+    const readings = values.filter((value) => value != null);
+    $('#gpuTempEmpty').hidden = readings.length > 0;
+    tempChart.hidden = readings.length === 0;
+    if (!readings.length) return;
+    const labels = times.slice(start).map(fmt.hhmm);
+    Charts.line(tempChart, {
+      labels,
+      series: [{ name: '温度', values }],
+      smooth: true,
+      colourStops: [[38, 'var(--temp-cool)'], [55, 'var(--warning)'], [70, 'var(--temp-warm)'], [85, 'var(--negative)']],
+      format: (v) => `${v}°C`,
+      height: 140,
+      min: Math.min(...readings) - 5,
+      max: Math.max(...readings) + 5,
+      xAt: minutePicks(labels, tempChart.clientWidth),
+    });
+  }
 
   function drawDetail() {
     const data = state.data;
@@ -215,10 +259,15 @@
     if (pos < 0) return;
     const g = data.gpus[pos];
     const lineEl = $('#gpuChart'), barEl = $('#gpuMemChart');
-    const b = bucketHistory(data, pos, lineEl.clientWidth);
-    if (!b) return;
     setText($('#gpuDetailTitle'), `GPU ${g.index}`);
     setText($('#gpuDetailSub'), `${g.name} · 利用率 ${g.util ?? '—'}% · 显存 ${fmt.gb(g.memUsed || 0)} / ${fmt.gb(g.memTotal || 0)} GB · ${g.temp ?? '—'}°C`);
+    drawTemperature(data, pos);
+    const b = bucketHistory(data, pos, lineEl.clientWidth);
+    if (!b) {
+      lineEl.textContent = '';
+      $('#gpuMemBlock').hidden = true;
+      return;
+    }
     // memory history only starts with the first sample recorded after this version, so the bars keep their place
     // on the time axis and simply leave the earlier buckets empty
     const withMem = b.mem.some((v) => v != null);
@@ -281,7 +330,8 @@
   // closedby="none" on the dialog keeps Esc from closing it before the fold-back can run
   gpuDialog.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.preventDefault(); closeDetail(); } });
   gpuDialog.addEventListener('close', () => { detailGpu = null; closing = false; });
-  for (const el of [$('#gpuChart'), $('#gpuMemChart')]) {
+  const detailCharts = [$('#gpuChart'), $('#gpuMemChart'), tempChart];
+  for (const el of detailCharts) {
     el.addEventListener('pointerenter', () => { el._hovered = true; });
     el.addEventListener('pointerleave', () => { el._hovered = false; if (gpuDialog.open) drawDetail(); });
   }
@@ -558,7 +608,7 @@
     renderMachine(data);
     renderTasksView(data);
     drawSparks(data);
-    if (gpuDialog.open && detailGpu != null && !$('#gpuChart')._hovered && !$('#gpuMemChart')._hovered) drawDetail();
+    if (gpuDialog.open && detailGpu != null && !detailCharts.some((el) => el._hovered)) drawDetail();
   }
 
   /* ---------- polling ---------- */
@@ -648,6 +698,7 @@
     syncThemeButton();
     // the charts bake their stroke colours at draw time, so a theme flip needs a redraw
     if (state.data) drawSparks(state.data);
+    if (gpuDialog.open) drawDetail();
   }
 
   /* ---------- SSH 登录弹窗 ---------- */

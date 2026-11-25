@@ -19,6 +19,8 @@
   --positive: #5fc39c;
   --negative: #e5566f;
   --warning: #d9a441;
+  --temp-cool: #93c5fd;
+  --temp-warm: #fdba74;
   --note-bg: #2a2416;
   --note-border: #4a3b1c;
   --chart-1: #f2f2f3;
@@ -70,6 +72,8 @@
   --positive: #1a8a5f;
   --negative: #c33b52;
   --warning: #8a5f0a;
+  --temp-cool: var(--accent);
+  --temp-warm: #a84615;
   --note-bg: #fdf5e3;
   --note-border: #ecd9a8;
   --chart-1: #16171a;
@@ -291,7 +295,23 @@ body.paused .live .dot { background: var(--faint); }
   background-image: repeating-linear-gradient(90deg, var(--text) 0 5px, transparent 5px 9px); /* taste-skill-ignore: the filled cells of the same meter */
   transition: width 320ms var(--ease-out);
 }
-.gpu-meta { margin-top: 9px; color: var(--faint); font-size: var(--fs-small); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.gpu-meta { display: flex; align-items: center; gap: 1ch; margin-top: 9px; color: var(--faint); font-size: var(--fs-small); white-space: nowrap; }
+.gpu-meta-rest { overflow: hidden; text-overflow: ellipsis; }
+.gpu-temp { display: inline-flex; flex-shrink: 0; align-items: center; gap: 6px; color: var(--temp-cool); font-weight: 500; }
+.gpu-temp svg { flex-shrink: 0; overflow: visible; }
+.gpu-temp rect { fill: var(--control); }
+.gpu-temp[data-level="1"] rect:last-child,
+.gpu-temp[data-level="2"] rect:nth-last-child(-n+2),
+.gpu-temp[data-level="3"] rect:nth-last-child(-n+3),
+.gpu-temp[data-level="4"] rect:nth-last-child(-n+4) { fill: currentColor; }
+.gpu-temp[data-level="5"] rect { fill: inherit; }
+.gpu-temp[data-level="3"] { color: var(--warning); }
+.gpu-temp[data-level="4"] { color: var(--temp-warm); }
+.gpu-temp[data-level="5"] { color: #fda4af; }
+.gpu-temp[data-level="5"] svg { filter: drop-shadow(0 0 5px rgba(244, 63, 94, 0.65)); }
+:root[data-theme="light"] .gpu-temp[data-level="5"] { color: var(--negative); }
+.gpu-temp[data-level="0"] { display: inline; color: inherit; font-weight: inherit; }
+.gpu-temp[data-level="0"] svg { display: none; }
 /* the expand control rides the card's top-right corner, so it never covers the utilisation figure */
 .expand {
   position: absolute;
