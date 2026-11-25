@@ -16,6 +16,8 @@
 
 关闭窗口后仍会继续采样。用 macOS 菜单栏或 Windows 托盘的「打开面板」恢复窗口，也可以再次双击应用。要结束采样，从同一菜单选择「退出」。
 
+带有更新功能的 macOS 发行版会在启动后自动检查新版，也可以从「GPU Monitor」菜单或菜单栏图标选择「检查更新…」。发现新版时会显示更新说明，由你确认是否安装。从未内置更新器的版本升级时，第一次需要手动安装带更新器的版本。
+
 ## 连接和迁移
 
 第一次打开时可选择 SSH 配置里的免密主机，也可输入主机、端口、用户名和密码。登录后会保存连接并在下次启动时重连。密码由 macOS 钥匙串或 Windows DPAPI 保存。点「清除登录」可断开并删除保存的连接。
@@ -44,6 +46,33 @@ packaging/build-windows.sh     # Windows x64
 ```
 
 ZIP 输出到 `dist/`。macOS 脚本生成 ad-hoc 签名包，无 Developer ID 签名或公证。Windows 脚本未对生成的应用执行 Authenticode 签名。系统可能对从其他设备下载的 ZIP 提示安全检查。
+
+### 发布带应用内更新的 macOS 版本
+
+1. 从 [Sparkle 发行页](https://github.com/sparkle-project/Sparkle/releases/tag/2.10.1) 下载并解压 Sparkle SDK，首次运行 `bin/generate_keys --account FIREGUXBA.gpu-monitor`。它将私钥保存在钥匙串里并显示公钥。以后所有升级包都要用同一把私钥签名，请备份私钥。
+2. 提升 `package.json` 中的版本号，配置公钥后打包。脚本会嵌入固定版本的 Sparkle SDK，并验证 SDK 下载的 SHA-256。构建机需要 Xcode 或 Command Line Tools，以及 Node.js 开发头文件。可用 `NODE_HEADERS_DIR` 指定 `node_api.h` 所在目录。
+
+   ```bash
+   export SPARKLE_PUBLIC_ED_KEY="$(/path/to/Sparkle/bin/generate_keys --account FIREGUXBA.gpu-monitor -p)"
+   npm ci
+   ./packaging/build-macos.sh arm64
+   ```
+
+3. 为每个已支持的 Mac 架构生成独立的更新源。下面是 `v0.2.0` 的 Apple Silicon 示例。`bin` 是解压后的 Sparkle 工具包内的目录。在暂存目录放入 `GPU-Monitor-Electron-macos-arm64.html`，即可把更新说明嵌进 XML。
+
+   ```bash
+   appcast_dir=$(mktemp -d)
+   cp dist/GPU-Monitor-Electron-macos-arm64.zip "$appcast_dir/"
+   /path/to/Sparkle/bin/generate_appcast \
+     --account FIREGUXBA.gpu-monitor \
+     --download-url-prefix https://github.com/FIREGUXBA/gpu-monitor/releases/download/v0.2.0/ \
+     --embed-release-notes -o "$appcast_dir/appcast-macos-arm64.xml" "$appcast_dir"
+   cp "$appcast_dir/appcast-macos-arm64.xml" dist/
+   ```
+
+4. 把 ZIP 和 `appcast-macos-arm64.xml` 一起附到同一个 GitHub Release，再将其发布为最新正式版。客户端默认从 `releases/latest/download/` 读取对应架构的 XML。此后发布最新正式版时，继续附上每个已支持架构的 appcast。可以在构建时通过 `SPARKLE_FEED_URL` 改用其他 HTTPS 更新源。
+
+未配置公钥时，仍可构建普通 ZIP。换用 Developer ID 签名或公证属于独立的发布流程，Sparkle EdDSA 签名只用于验证更新包。
 
 ## 常见问题
 

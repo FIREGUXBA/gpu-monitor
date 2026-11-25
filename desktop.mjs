@@ -1,4 +1,5 @@
-import { mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { join, resolve } from 'node:path';
 import { app, BrowserWindow, dialog, Menu, nativeImage, nativeTheme, protocol, session, Tray } from 'electron';
 import { migrateSourceData } from './migrate.mjs';
@@ -10,6 +11,22 @@ const dataDir = resolve(process.env.GPU_MONITOR_DATA_DIR || join(
 ));
 const origin = 'gpu-monitor://panel';
 app.setName('GPU Monitor');
+
+function startUpdater() {
+  if (!mac || !app.isPackaged) return;
+  const addon = join(process.resourcesPath, '..', 'Frameworks', 'mac-updater.node');
+  if (!existsSync(addon)) return;
+  try {
+    const updater = createRequire(import.meta.url)(addon);
+    updater.start();
+    return () => {
+      app.focus({ steal: true });
+      updater.checkForUpdates();
+    };
+  } catch (error) {
+    console.error('GPU Monitor 更新器启动失败:', error);
+  }
+}
 
 protocol.registerSchemesAsPrivileged([{
   scheme: 'gpu-monitor',
@@ -123,16 +140,33 @@ if (!app.requestSingleInstanceLock()) {
       window.hide();
     });
 
+    await window.loadURL(origin + (mac ? '/?window=mac' : '/'));
+    if (quitting) return;
+    loaded = true;
+    showPanel();
+
+    const checkForUpdates = startUpdater();
+    if (checkForUpdates) {
+      Menu.setApplicationMenu(Menu.buildFromTemplate([
+        { role: 'appMenu', submenu: [
+          { role: 'about' },
+          { label: '检查更新…', click: checkForUpdates },
+          { type: 'separator' },
+          { role: 'hide' }, { role: 'hideOthers' }, { role: 'unhide' },
+          { type: 'separator' }, { role: 'quit' },
+        ] },
+        { role: 'editMenu' }, { role: 'viewMenu' }, { role: 'windowMenu' },
+      ]));
+    }
+
     tray = new Tray(trayImage());
     tray.setToolTip('GPU Monitor');
     tray.setContextMenu(Menu.buildFromTemplate([
       { label: '打开面板', click: showPanel },
+      ...(checkForUpdates ? [{ label: '检查更新…', click: checkForUpdates }] : []),
       { label: '退出', click: () => app.quit() },
     ]));
     if (!mac) tray.on('click', showPanel);
-    await window.loadURL(origin + (mac ? '/?window=mac' : '/'));
-    loaded = true;
-    showPanel();
   })();
 
   void startup.catch((err) => {

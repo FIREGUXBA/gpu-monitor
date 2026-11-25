@@ -2,9 +2,11 @@ import { execFileSync } from 'node:child_process';
 import { copyFile, mkdir, mkdtemp, readFile, rename, rm } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { packager } from '@electron/packager';
+import { embedMacUpdater, macUpdaterConfig } from './embed-mac-updater.mjs';
 
 const [platform, arch] = process.argv.slice(2);
 const mac = platform === 'darwin';
+const updaterConfig = mac ? macUpdaterConfig(arch, process.env) : undefined;
 const name = 'GPU Monitor';
 const dist = resolve('dist');
 const cache = resolve('.cache');
@@ -43,6 +45,7 @@ try {
   const zip = join(staging, output + '.zip');
   if (mac) {
     const app = join(bundle, name + '.app');
+    if (updaterConfig) await embedMacUpdater(app, staging, cache, arch, updaterConfig);
     run('codesign', ['--force', '--deep', '--sign', '-', app]);
     run('codesign', ['--verify', '--deep', '--strict', app]);
     run('ditto', ['-c', '-k', '--keepParent', app, zip]);
