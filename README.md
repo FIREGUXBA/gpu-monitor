@@ -11,12 +11,14 @@
 ## 桌面版
 
 - **macOS**：解压 `GPU-Monitor-Electron-macos-arm64.zip`，双击 `GPU Monitor.app`。这个包适用于 Apple Silicon。可将应用拖到「应用程序」目录。
-- **Windows x64**：完整解压 `GPU-Monitor-Electron-windows-x64.zip`，在解压后的文件夹中双击 `GPU Monitor.exe`。使用免密登录时，请在 Windows 的可选功能中安装 OpenSSH 客户端。
+- **Windows x64**：下载 `GPU-Monitor-Setup-<版本>-x64.exe`，双击并按向导安装。也可下载便携 ZIP，完整解压后运行 `GPU Monitor.exe`。使用免密登录时，请在 Windows 的可选功能中安装 OpenSSH 客户端。
 - **从源码启动**：安装 Node.js 22.12 或以上版本，在 macOS 双击 `gpu-monitor.command`。也可以运行 `npm ci && npm start`。首次启动会下载 Electron 运行时。
 
 关闭窗口后仍会继续采样。用 macOS 菜单栏或 Windows 托盘的「打开面板」恢复窗口，也可以再次双击应用。要结束采样，从同一菜单选择「退出」。
 
 带有更新功能的 macOS 发行版会在启动后自动检查新版，也可以从「GPU Monitor」菜单或菜单栏图标选择「检查更新…」。发现新版时会显示更新说明，由你确认是否安装。从未内置更新器的版本升级时，第一次需要手动安装带更新器的版本。
+
+Windows 安装版在启动时自动检查更新，也可以从窗口的「帮助」菜单或托盘菜单选择「检查更新…」。确认后应用会下载新版，并重启完成安装。便携版用户可以先退出旧版，再运行安装包启用此功能，原有的连接和采样历史会继续使用。
 
 ## 连接和迁移
 
@@ -45,7 +47,11 @@ packaging/build-macos.sh       # 当前 Mac 架构，也可显式传入 arm64 �
 packaging/build-windows.sh     # Windows x64
 ```
 
-ZIP 输出到 `dist/`。macOS 脚本生成 ad-hoc 签名包，无 Developer ID 签名或公证。Windows 脚本未对生成的应用执行 Authenticode 签名。系统可能对从其他设备下载的 ZIP 提示安全检查。
+构建产物输出到 `dist/`。macOS 脚本生成 ad-hoc 签名包，无 Developer ID 签名或公证。Windows 脚本生成 NSIS 安装包、更新清单和便携 ZIP。未配置 Authenticode 证书时，Windows 可能显示 SmartScreen 提示。
+
+### 发布带应用内更新的 Windows 版本
+
+提升 `package.json` 的版本号并同步锁文件，运行 `packaging/build-windows.sh`。将同一次构建的 `GPU-Monitor-Setup-<版本>-x64.exe` 与 `latest.yml` 一并上传到对应的 GitHub Release，并设为最新正式版。客户端从 `releases/latest/download/latest.yml` 获取版本和安装包的 SHA-512。
 
 ### 发布带应用内更新的 macOS 版本
 

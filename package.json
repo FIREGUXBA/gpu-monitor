@@ -3,11 +3,13 @@
   "version": "0.1.1",
   "private": true,
   "dependencies": {
+    "electron-updater": "6.8.11",
     "ssh2": "^1.17.0"
   },
   "devDependencies": {
     "@electron/packager": "20.3.0",
-    "electron": "45.4.1"
+    "electron": "45.4.1",
+    "electron-builder": "26.18.0"
   },
   "main": "desktop.mjs",
   "scripts": {

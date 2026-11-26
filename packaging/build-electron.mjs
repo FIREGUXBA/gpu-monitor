@@ -21,37 +21,66 @@ function run(command, args, cwd) {
 
 try {
   await mkdir(join(source, 'public'), { recursive: true });
-  for (const file of ['desktop.mjs', 'migrate.mjs', 'server.mjs', 'package.json', 'package-lock.json',
+  for (const file of ['desktop.mjs', 'windows-updater.mjs', 'migrate.mjs', 'server.mjs', 'package.json', 'package-lock.json',
     'public/index.html', 'public/app.css', 'public/app.js', 'public/charts.js',
     'public/favicon.png', 'public/gpu-monitor.png']) {
     await copyFile(file, join(source, file));
   }
   run('npm', ['ci', '--omit=dev', '--omit=optional', '--ignore-scripts', '--no-audit', '--no-fund'], source);
-  await rm(join(source, 'package-lock.json'));
 
   const pkg = JSON.parse(await readFile('package.json', 'utf8'));
-  const [bundle] = await packager({
-    dir: source,
-    out: staging,
-    name,
-    icon: resolve('packaging/icons/gpu-monitor'),
-    platform,
-    arch,
-    electronVersion: pkg.devDependencies.electron,
-    appBundleId: 'local.gpu-monitor',
-    prune: false,
-  });
-
   const zip = join(staging, output + '.zip');
   if (mac) {
+    await rm(join(source, 'package-lock.json'));
+    const [bundle] = await packager({
+      dir: source,
+      out: staging,
+      name,
+      icon: resolve('packaging/icons/gpu-monitor'),
+      platform,
+      arch,
+      electronVersion: pkg.devDependencies.electron,
+      appBundleId: 'local.gpu-monitor',
+      prune: false,
+    });
     const app = join(bundle, name + '.app');
     if (updaterConfig) await embedMacUpdater(app, staging, cache, arch, updaterConfig);
     run('codesign', ['--force', '--deep', '--sign', '-', app]);
     run('codesign', ['--verify', '--deep', '--strict', app]);
     run('ditto', ['-c', '-k', '--keepParent', app, zip]);
   } else {
+    const { build, Platform, Arch } = await import('electron-builder');
+    const installerDir = join(staging, 'installer');
+    await build({
+      projectDir: source,
+      targets: Platform.WINDOWS.createTarget('nsis', Arch.x64),
+      publish: 'never',
+      config: {
+        appId: 'local.gpu-monitor',
+        productName: name,
+        electronVersion: pkg.devDependencies.electron,
+        npmRebuild: false,
+        directories: { output: installerDir },
+        win: {
+          icon: resolve('packaging/icons/gpu-monitor.ico'),
+          artifactName: 'GPU-Monitor-Setup-${version}-x64.exe',
+        },
+        nsis: { oneClick: false, allowToChangeInstallationDirectory: true, differentialPackage: false },
+        publish: {
+          provider: 'generic',
+          url: 'https://github.com/FIREGUXBA/gpu-monitor/releases/latest/download/',
+        },
+      },
+    });
+    const bundle = join(installerDir, 'win-unpacked');
+    await rm(join(bundle, 'resources', 'app-update.yml'));
     await rename(bundle, join(staging, output));
     run('zip', ['-qr', zip, output], staging);
+    await mkdir(dist, { recursive: true });
+    for (const file of [`GPU-Monitor-Setup-${pkg.version}-x64.exe`, 'latest.yml']) {
+      await rename(join(installerDir, file), join(dist, file));
+      console.log(join(dist, file));
+    }
   }
   run('unzip', ['-tq', zip]);
   await mkdir(dist, { recursive: true });

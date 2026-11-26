@@ -3,6 +3,7 @@ import { createRequire } from 'node:module';
 import { join, resolve } from 'node:path';
 import { app, BrowserWindow, dialog, Menu, nativeImage, nativeTheme, protocol, session, Tray } from 'electron';
 import { migrateSourceData } from './migrate.mjs';
+import { startWindowsUpdater } from './windows-updater.mjs';
 
 const mac = process.platform === 'darwin';
 const dataDir = resolve(process.env.GPU_MONITOR_DATA_DIR || join(
@@ -74,9 +75,7 @@ if (!app.requestSingleInstanceLock()) {
   app.on('second-instance', showPanel);
   app.on('activate', showPanel);
   app.on('window-all-closed', () => {});
-  app.on('before-quit', (event) => {
-    if (stopped) return;
-    event.preventDefault();
+  function finishQuit(action) {
     if (quitting) return;
     quitting = true;
     void (async () => {
@@ -86,9 +85,15 @@ if (!app.requestSingleInstanceLock()) {
       } finally {
         stopped = true;
         tray?.destroy();
-        app.quit();
+        action();
       }
     })().catch(console.error);
+  }
+
+  app.on('before-quit', (event) => {
+    if (stopped) return;
+    event.preventDefault();
+    finishQuit(() => app.quit());
   });
 
   const startup = (async () => {
@@ -145,8 +150,18 @@ if (!app.requestSingleInstanceLock()) {
     loaded = true;
     showPanel();
 
-    const checkForUpdates = startUpdater();
-    if (checkForUpdates) {
+    let checkForUpdates = startUpdater();
+    if (process.platform === 'win32' && app.isPackaged && existsSync(join(process.resourcesPath, 'app-update.yml'))) {
+      const { autoUpdater } = createRequire(import.meta.url)('electron-updater');
+      checkForUpdates = startWindowsUpdater(autoUpdater, window, dialog, () => finishQuit(() => {
+        autoUpdater.once('error', () => {
+          dialog.showErrorBox('GPU Monitor 更新失败', '无法启动更新安装程序。请重新打开 GPU Monitor 后重试。');
+          app.quit();
+        });
+        autoUpdater.quitAndInstall(true, true);
+      }));
+    }
+    if (mac && checkForUpdates) {
       Menu.setApplicationMenu(Menu.buildFromTemplate([
         { role: 'appMenu', submenu: [
           { role: 'about' },
@@ -157,13 +172,21 @@ if (!app.requestSingleInstanceLock()) {
         ] },
         { role: 'editMenu' }, { role: 'viewMenu' }, { role: 'windowMenu' },
       ]));
+    } else if (checkForUpdates) {
+      Menu.setApplicationMenu(Menu.buildFromTemplate([
+        { role: 'fileMenu' }, { role: 'editMenu' }, { role: 'viewMenu' }, { role: 'windowMenu' },
+        { label: '帮助', submenu: [{ label: '检查更新…', click: checkForUpdates }] },
+      ]));
     }
 
     tray = new Tray(trayImage());
     tray.setToolTip('GPU Monitor');
     tray.setContextMenu(Menu.buildFromTemplate([
       { label: '打开面板', click: showPanel },
-      ...(checkForUpdates ? [{ label: '检查更新…', click: checkForUpdates }] : []),
+      ...(checkForUpdates ? [{ label: '检查更新…', click: () => {
+        showPanel();
+        checkForUpdates();
+      } }] : []),
       { label: '退出', click: () => app.quit() },
     ]));
     if (!mac) tray.on('click', showPanel);
