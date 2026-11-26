@@ -2,6 +2,8 @@
   const $ = (s, root = document) => root.querySelector(s);
   const $$ = (s, root = document) => [...root.querySelectorAll(s)];
   const pad = (n) => String(n).padStart(2, '0');
+  const MINUTE = 60000;
+  const DAY = 1440 * MINUTE;
 
   const state = {
     data: null,
@@ -64,6 +66,25 @@
 
   /* ---------- GPU cards ---------- */
   const temperatureThresholds = [35, 55, 70, 85];
+  const memoryTints = ['#315d89', '#884655', '#376b52', '#654d89', '#876128', '#246b70', '#665748', '#87486f'];
+  const memoryColours = new Map();
+  const memoryAmount = (mib) => mib < 102.4 ? `${Math.round(mib)} MiB` : fmt.gbUnit(mib);
+
+  function memorySegments(total, tasks, gpu) {
+    if (!(total > 0)) return [];
+    if (tasks == null) return [{ label: '未记录任务分项', value: total, colour: 'var(--text)' }];
+    if (!memoryColours.has(gpu)) memoryColours.set(gpu, new Map());
+    const colours = memoryColours.get(gpu);
+    const sum = tasks.reduce((n, [, , value]) => n + value, 0);
+    // The process and device queries run separately, so their totals can briefly disagree.
+    const scale = sum > total ? total / sum : 1;
+    const segments = [...tasks].sort(([a], [b]) => a.localeCompare(b)).map(([key, label, value, user]) => {
+      if (!colours.has(key)) colours.set(key, memoryTints[colours.size % memoryTints.length]);
+      return { label, user, value: value * scale, colour: `color-mix(in srgb, ${colours.get(key)}, white var(--memory-highlight))` };
+    });
+    if (total > sum) segments.push({ label: '未归属显存', value: total - sum, colour: 'var(--memory-unassigned)' });
+    return segments;
+  }
 
   function ensureCards(gpus) {
     const grid = $('#gpuGrid');
@@ -83,7 +104,7 @@
         card.innerHTML = `
           <header class="gpu-head"><h3></h3><span class="gpu-util"><span class="val num"></span><span class="pct">%</span></span></header>
           <div class="spark"></div>
-          <div class="gpu-mem"><div class="line"><span>显存</span><span class="num"></span></div><div class="track"><span></span></div></div>
+          <div class="gpu-mem"><div class="line"><span>显存</span><span class="num"></span></div><div class="track"></div></div>
           <p class="gpu-meta num">
             <span class="gpu-temp"><svg width="11" height="14" viewBox="0 0 11 14" aria-hidden="true">
               <defs><linearGradient id="${tempGradient}" x1="5.5" y1="13" x2="5.5" y2="1" gradientUnits="userSpaceOnUse">
@@ -121,6 +142,11 @@
           spark._hovered = false;
           if (state.data) drawSparks(state.data);
         });
+        const memory = card.querySelector('.gpu-mem');
+        const track = memory.querySelector('.track');
+        const showMemoryTip = Charts.segmentTooltip(memory, memoryAmount);
+        track.addEventListener('pointermove', (e) => showMemoryTip(e, e.target._memorySegment));
+        track.addEventListener('pointerleave', () => showMemoryTip());
         cell.append(card, expand);
         state.cards.set(g.index, card);
         grid.appendChild(cell);
@@ -136,9 +162,17 @@
     setText(val, util);
     setText(card.querySelector('.gpu-util .pct'), '%');
     const total = g.memTotal || 0;
-    const pct = total ? Math.min(100, (g.memUsed / total) * 100) : 0;
     setText(card.querySelector('.gpu-mem .line .num'), `${fmt.gb(g.memUsed)} / ${fmt.gb(total)} GB`);
-    card.querySelector('.gpu-mem .track > span').style.width = `${pct}%`;
+    const track = card.querySelector('.gpu-mem .track');
+    const segments = memorySegments(g.memUsed, g.taskMem, g.index);
+    segments.forEach((segment, i) => {
+      const span = track.children[i] || track.appendChild(document.createElement('span'));
+      span._memorySegment = segment;
+      span.style.backgroundColor = segment.colour;
+      span.style.width = total ? `${segment.value / Math.max(total, g.memUsed) * 100}%` : '0%';
+    });
+    while (track.children.length > segments.length) track.lastElementChild.remove();
+    card.setAttribute('aria-description', segments.map(({ label, user, value }) => [label, user, memoryAmount(value)].filter(Boolean).join(' · ')).join('\n'));
     const clock = g.clock == null ? '—' : `${(g.clock / 1000).toFixed(2)} GHz`;
     const temp = g.temp == null ? '—' : `${g.temp}°C`;
     const power = g.power == null ? '—' : `${Math.round(g.power)} W`;
@@ -152,36 +186,43 @@
     card.setAttribute('aria-label', `GPU ${g.index}：利用率 ${util}%，显存 ${fmt.gb(g.memUsed)} / ${fmt.gb(total)} GB，温度 ${temp}。${on ? '已选中，点按取消筛选。' : '点按只看这张卡上的任务。'}`);
   }
 
-  // the 2-second samples folded into short means: a raw series of 450 points turns a 150px card into a wall of
-  // strokes, while a short-window mean still shows the shape of the load
-  function bucketHistory(data, pos, width) {
-    const hist = data.history || { t: [], util: [] };
-    const t = hist.t || [];
-    const cutoff = (data.sampledAt || Date.now()) - state.range * 60000;
-    let start = 0;
-    while (start < t.length && t[start] < cutoff) start++;
-    const n = t.length - start;
-    if (n <= 0) return null;
+  function clearChart(el, data) {
+    el._draw = null;
+    setText(el, data.history ? '所选时段暂无采样' : '正在读取历史…');
+  }
+
+  // Fold samples into short means while retaining empty buckets on the time axis.
+  function bucketHistory(data, pos, width, withTasks = false) {
+    const hist = data.history;
+    if (!hist?.t.length) return null;
+    const { t, util, mem: memory } = hist;
     const plot = Math.max(120, (width || 240) - 52);
     const count = Math.max(24, Math.min(90, Math.floor(plot / 6)));
-    const size = Math.max(1, Math.ceil(n / count));
-    const labels = [], mean = [], mem = [];
-    for (let i = start; i < t.length; i += size) {
-      let sum = 0, seen = 0, at = null, memSum = 0, memSeen = 0;
+    const size = Math.ceil(t.length / count);
+    const labels = [], mean = [], mem = [], taskMem = [];
+    for (let i = 0; i < t.length; i += size) {
+      let sum = 0, seen = 0, memSum = 0, memSeen = 0;
+      let tasks = null;
       for (let k = i; k < Math.min(i + size, t.length); k++) {
-        const v = hist.util[pos]?.[k];
-        if (v == null) continue;
-        if (at == null) at = t[k];
-        sum += v; seen++;
-        const m = hist.mem?.[pos]?.[k];
-        if (m != null) { memSum += m; memSeen++; }
+        const v = util[pos]?.[k];
+        if (v != null) { sum += v; seen++; }
+        const m = memory?.[pos]?.[k];
+        if (m == null) continue;
+        memSum += m; memSeen++;
+        const sample = withTasks ? hist.taskMem?.[pos]?.[k] : null;
+        if (sample == null) continue;
+        tasks ??= new Map();
+        for (const [key, label, value, user] of sample) {
+          const previous = tasks.get(key);
+          tasks.set(key, [label, (previous?.[1] ?? 0) + value, user ?? previous?.[2] ?? null]);
+        }
       }
-      if (!seen) continue;
-      labels.push(fmt.hhmm(at));
-      mean.push(sum / seen);
+      labels.push(fmt.hhmm(t[i]));
+      mean.push(seen ? sum / seen : null);
       mem.push(memSeen ? memSum / memSeen / 1024 : null);
+      if (withTasks) taskMem.push(tasks ? [...tasks].map(([key, [label, value, user]]) => [key, label, value / memSeen, user]) : null);
     }
-    return labels.length ? { labels, mean, mem } : null;
+    return { labels, mean, mem, taskMem };
   }
 
   function minutePicks(labels, width) {
@@ -201,19 +242,19 @@
     return picks;
   }
 
-  function drawSparks(data) {
+  function drawSparks(data, refreshCharts = false) {
     if (state.route !== 'overview') return;
     data.gpus.forEach((g, pos) => {
       const card = state.cards.get(g.index);
       if (!card) return;
       const el = card.querySelector('.spark');
-      if (!el.clientWidth || el._hovered) return;
+      if (!el.clientWidth || (el._hovered && !refreshCharts)) return;
       const buckets = bucketHistory(data, pos, el.clientWidth);
-      if (!buckets) { el.textContent = ''; return; }
+      if (!buckets?.mean.some((v) => v != null)) { clearChart(el, data); return; }
       Charts.line(el, {
         labels: buckets.labels,
         series: [{ name: '利用率', values: buckets.mean }],
-        fill: true,
+        fill: buckets.mean.every((v) => v != null),
         format: (v) => `${Math.round(v)}%`,
         tickFormat: (v) => `${v}%`,
         height: Math.round(el.clientHeight) || 88,
@@ -227,19 +268,21 @@
 
   /* ---------- GPU detail: the card opens into its own charts ---------- */
   const gpuDialog = $('#gpuDialog');
+  const rangePopover = $('#rangePopover');
   const tempChart = $('#gpuTempChart');
   let detailGpu = null;
 
   function drawTemperature(data, pos) {
-    const times = data.history?.t || [];
-    const cutoff = (data.sampledAt || Date.now()) - state.range * 60000;
-    const start = times.findIndex((time) => time >= cutoff);
-    const values = start < 0 ? [] : times.slice(start).map((_, i) => data.history.temp?.[pos]?.[start + i] ?? null);
+    const values = data.history?.temp?.[pos] || [];
     const readings = values.filter((value) => value != null);
-    $('#gpuTempEmpty').hidden = readings.length > 0;
+    const empty = $('#gpuTempEmpty');
+    empty.hidden = readings.length > 0;
     tempChart.hidden = readings.length === 0;
-    if (!readings.length) return;
-    const labels = times.slice(start).map(fmt.hhmm);
+    if (!readings.length) {
+      setText(empty, data.history ? '所选时段暂无温度采样' : '正在读取历史…');
+      return;
+    }
+    const labels = data.history.t.map(fmt.hhmm);
     Charts.line(tempChart, {
       labels,
       series: [{ name: '温度', values }],
@@ -262,19 +305,15 @@
     setText($('#gpuDetailTitle'), `GPU ${g.index}`);
     setText($('#gpuDetailSub'), `${g.name} · 利用率 ${g.util ?? '—'}% · 显存 ${fmt.gb(g.memUsed || 0)} / ${fmt.gb(g.memTotal || 0)} GB · ${g.temp ?? '—'}°C`);
     drawTemperature(data, pos);
-    const b = bucketHistory(data, pos, lineEl.clientWidth);
-    if (!b) {
-      lineEl.textContent = '';
-      $('#gpuMemBlock').hidden = true;
-      return;
-    }
+    const b = bucketHistory(data, pos, lineEl.clientWidth, true);
     // memory history only starts with the first sample recorded after this version, so the bars keep their place
     // on the time axis and simply leave the earlier buckets empty
-    const withMem = b.mem.some((v) => v != null);
-    Charts.line(lineEl, {
+    const withMem = b?.mem.some((v) => v != null);
+    if (!b?.mean.some((v) => v != null)) clearChart(lineEl, data);
+    else Charts.line(lineEl, {
       labels: b.labels,
       series: [{ name: '利用率', values: b.mean }],
-      fill: true,
+      fill: b.mean.every((v) => v != null),
       format: (v) => `${Math.round(v)}%`,
       tickFormat: (v) => `${v}%`,
       height: 200,
@@ -288,6 +327,9 @@
     Charts.bars(barEl, {
       labels: b.labels,
       values: b.mem,
+      segments: b.mem.map((gb, i) => memorySegments(gb * 1024, b.taskMem[i], g.index)
+        .map((segment) => ({ ...segment, value: segment.value / 1024 }))),
+      formatSegment: (gb) => memoryAmount(gb * 1024),
       format: (v) => (v == null ? '—' : `${v.toFixed(1)} GB`),
       tickFormat: (v) => `${v}`,
       height: 128,
@@ -299,6 +341,8 @@
     const card = state.cards.get(index);
     const from = card ? card.getBoundingClientRect() : null;
     detailGpu = index;
+    rangePopover.hidePopover();
+    $('#gpuDetailRange').append(rangePopover);
     gpuDialog.showModal();
     drawDetail();
     // grow out of the card the visitor clicked, so the two read as one surface
@@ -315,6 +359,7 @@
   let closing = false;
   function closeDetail() {
     if (!gpuDialog.open || closing) return;
+    rangePopover.hidePopover();
     const card = state.cards.get(detailGpu);
     if (!card || matchMedia('(prefers-reduced-motion: reduce)').matches) { gpuDialog.close(); return; }
     const from = gpuDialog.getBoundingClientRect(), to = card.getBoundingClientRect();
@@ -328,8 +373,16 @@
   $('#gpuDetailClose').addEventListener('click', closeDetail);
   gpuDialog.addEventListener('click', (e) => { if (e.target === gpuDialog) closeDetail(); });
   // closedby="none" on the dialog keeps Esc from closing it before the fold-back can run
-  gpuDialog.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.preventDefault(); closeDetail(); } });
-  gpuDialog.addEventListener('close', () => { detailGpu = null; closing = false; });
+  gpuDialog.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape' || rangePopover.matches(':popover-open')) return;
+    e.preventDefault();
+    closeDetail();
+  });
+  gpuDialog.addEventListener('close', () => {
+    $('#historyRange').append(rangePopover);
+    detailGpu = null;
+    closing = false;
+  });
   const detailCharts = [$('#gpuChart'), $('#gpuMemChart'), tempChart];
   for (const el of detailCharts) {
     el.addEventListener('pointerenter', () => { el._hovered = true; });
@@ -584,7 +637,7 @@
   }
 
   /* ---------- render ---------- */
-  function render(data) {
+  function render(data, refreshCharts = false) {
     ensureCards(data.gpus);
     renderStamp();
     syncTitle();
@@ -607,30 +660,52 @@
     renderUsers(data);
     renderMachine(data);
     renderTasksView(data);
-    drawSparks(data);
-    if (gpuDialog.open && detailGpu != null && !detailCharts.some((el) => el._hovered)) drawDetail();
+    drawSparks(data, refreshCharts);
+    if (gpuDialog.open && detailGpu != null && (refreshCharts || !detailCharts.some((el) => el._hovered))) drawDetail();
   }
 
   /* ---------- polling ---------- */
   let timer = null;
   let prompted = false;
-  async function fetchState() {
+  let latestRequest = 0;
+  async function fetchState(historyOnly = false) {
+    const request = ++latestRequest;
+    const range = state.range;
+    const pausedAt = historyOnly ? state.data?.sampledAt : null;
+    const query = Array.isArray(range) ? { from: range[0], to: range[1] }
+      : pausedAt ? { from: pausedAt - range * MINUTE, to: pausedAt }
+      : { minutes: range };
     try {
-      const res = await fetch('/api/state', { cache: 'no-store' });
+      const res = await fetch(`/api/state?${new URLSearchParams(query)}`, { cache: 'no-store' });
       if (!res.ok && res.status !== 503) throw new Error(String(res.status));
       const data = await res.json();
+      if (request !== latestRequest) return;
+      const refreshCharts = Boolean(rangeControl.dataset.query);
+      if (historyOnly && state.paused && state.data) {
+        if (data.target !== state.data.target) throw new Error('监控目标已变更');
+        state.data.history = data.history;
+        render(state.data, refreshCharts);
+        if (refreshCharts) finishRangeQuery();
+        return;
+      }
       state.data = data;
       const starting = data.error === '正在采样…';
       state.failed = !!data.error && !starting;
       if (starting) $('#notice').hidden = true;
       else if (!data.error) $('#notice').hidden = true;
       else showNotice();
-      render(data);
+      render(data, refreshCharts);
+      if (refreshCharts) finishRangeQuery();
       if (data.configured === false && !prompted) {
         prompted = true;
         openConnect();
       }
     } catch {
+      if (request !== latestRequest) return;
+      if (rangeControl.dataset.query) {
+        setRangeQuery('error');
+        return;
+      }
       state.failed = true;
       showNotice();
       renderStamp();
@@ -638,15 +713,98 @@
   }
 
   async function loop() {
-    if (!state.paused) await fetchState();
+    if (!state.paused && rangeControl.dataset.query !== 'loading') await fetchState();
     timer = setTimeout(loop, 2000);
   }
 
-  function setRange(btn) {
-    state.range = Number(btn.dataset.range);
-    $$('.range-tabs button').forEach((b) => b.setAttribute('aria-pressed', b === btn ? 'true' : 'false'));
-    if (state.data) render(state.data);
+  const customRange = $('#customRange');
+  const rangeForm = $('#rangeForm');
+  const rangeFrom = $('#rangeFrom');
+  const rangeTo = $('#rangeTo');
+  const rangeError = $('#rangeError');
+  const rangeTrigger = $('#rangeTrigger');
+  const detailRangeTrigger = $('#gpuDetailRangeTrigger');
+  const rangeControl = $('#historyRange');
+  const rangeControls = $$('.history-range');
+  const rangeLabels = $$('.range-label');
+  const rangeQueryStatuses = $$('.range-query-status');
+  const rangeQueryError = $('#rangeQueryError');
+  const historyCharts = $$('#gpuGrid, #gpuDialog .detail-block');
+  const presets = $$('[data-range]');
+
+  function setRangeQuery(status) {
+    rangeControls.forEach((el) => {
+      if (status) el.dataset.query = status;
+      else delete el.dataset.query;
+    });
+    const busy = status === 'loading';
+    historyCharts.forEach((el) => el.setAttribute('aria-busy', String(busy)));
+    rangeQueryError.hidden = status !== 'error';
+    const message = busy ? '查询中…' : status === 'error' ? '查询失败' : '';
+    rangeQueryStatuses.forEach((el) => setText(el, message));
+    if (message) live(busy ? '正在查询所选时间范围' : '时间范围查询失败，仍显示上次的图表');
   }
+
+  function finishRangeQuery() {
+    setRangeQuery(null);
+    live('所选时间范围已加载');
+  }
+
+  function localMinute(time) {
+    const date = new Date(time);
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${fmt.hhmm(time)}`;
+  }
+
+  function showRangeForm(show) {
+    rangeForm.hidden = !show;
+    customRange.setAttribute('aria-expanded', String(show));
+    rangeError.hidden = true;
+    if (!show) return;
+    const now = Date.now();
+    const first = Math.ceil((now - DAY) / MINUTE) * MINUTE;
+    const last = Math.floor(now / MINUTE) * MINUTE;
+    rangeFrom.min = rangeTo.min = localMinute(first);
+    rangeFrom.max = rangeTo.max = localMinute(last);
+    const [from, to] = Array.isArray(state.range) ? state.range : [Math.max(first, last - state.range * MINUTE), last];
+    rangeFrom.value = localMinute(from);
+    rangeTo.value = localMinute(to);
+  }
+
+  function setRange(btn, range) {
+    presets.forEach((b) => b.setAttribute('aria-pressed', String(b === btn)));
+    const label = Array.isArray(range)
+      ? `自定义 · ${fmt.dur((range[1] - range[0]) / 1000).replace(/分$/, '分钟')}`
+      : `最近 ${btn.textContent}`;
+    rangeLabels.forEach((el) => setText(el, label));
+    rangePopover.hidePopover();
+    (gpuDialog.open ? detailRangeTrigger : rangeTrigger).focus();
+    if (range === state.range && state.data?.history && !rangeControl.dataset.query) return;
+    state.range = range;
+    setRangeQuery('loading');
+    fetchState(state.paused);
+  }
+
+  rangePopover.addEventListener('beforetoggle', (event) => {
+    if (event.newState === 'open') showRangeForm(Array.isArray(state.range));
+  });
+
+  customRange.addEventListener('click', () => {
+    showRangeForm(rangeForm.hidden);
+    if (!rangeForm.hidden) rangeFrom.focus();
+  });
+
+  rangeForm.addEventListener('submit', (event) => {
+    event.preventDefault();
+    const from = new Date(rangeFrom.value).getTime();
+    const to = new Date(rangeTo.value).getTime();
+    const now = Date.now();
+    if (!(from < to) || from < now - DAY || to > now) {
+      setText(rangeError, '请选择最近 24 小时内的时段，结束时间须晚于开始时间。');
+      rangeError.hidden = false;
+      return;
+    }
+    setRange(customRange, [from, to]);
+  });
 
   function applyRoute() {
     state.route = location.hash.startsWith('#/tasks') ? 'tasks' : 'overview';
@@ -931,10 +1089,10 @@
 
   $('#retry').addEventListener('click', () => fetchState());
 
-  $$('.range-tabs button').forEach((b) => b.addEventListener('click', () => setRange(b)));
+  presets.forEach((b) => b.addEventListener('click', () => setRange(b, Number(b.dataset.range))));
 
   document.addEventListener('visibilitychange', () => {
-    if (!document.hidden && !state.paused) fetchState();
+    if (!document.hidden && !state.paused && rangeControl.dataset.query !== 'loading') fetchState();
   });
   window.addEventListener('hashchange', applyRoute);
   window.addEventListener('resize', () => { if (state.data) drawSparks(state.data); });

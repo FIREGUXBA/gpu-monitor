@@ -21,7 +21,7 @@ const HOST = process.env.HOST || '127.0.0.1';
 const SSH_HOST = process.env.SSH_HOST || '';
 const SSH_COMMAND = IS_WIN ? join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'OpenSSH', 'ssh.exe') : 'ssh';
 const POLL_MS = 2000;
-const KEEP = 1100;
+const RAW_HISTORY_MS = 1100 * POLL_MS;
 const RETAIN_MS = 24 * 3600 * 1000;
 const COMPACT_EVERY = 1800;
 const REMOTE_TIMEOUT = 9000;
@@ -61,7 +61,7 @@ printf '%s\\n' "$GPU"
 echo '#APPS'
 printf '%s\\n' "$APPS"
 echo '#PS'
-if [ -n "$PIDS" ]; then ps -ww -o pid=,user:32=,etimes=,args= -p "$PIDS"; fi
+if [ -n "$PIDS" ]; then LC_ALL=C ps -ww -o pid=,user:32=,etimes=,lstart=,args= -p "$PIDS"; fi
 echo '#END'
 `;
 
@@ -532,7 +532,7 @@ function parseGpus(lines) {
     .sort((a, b) => a.index - b.index);
 }
 
-const history = { step: POLL_MS, t: [], util: [], mem: [], temp: [] };
+const history = { step: POLL_MS, t: [], util: [], mem: [], temp: [], taskMem: [] };
 let snapshot = null;
 let lastError = null;
 let lastGoodAt = null;
@@ -545,18 +545,26 @@ let sampling;
 let cudaTask;
 let connectionChange;
 
-function trimHistory() {
-  if (history.t.length <= KEEP) return;
-  const drop = history.t.length - KEEP;
-  history.t.splice(0, drop);
-  history.util.forEach((a) => a.splice(0, Math.min(drop, a.length)));
-  history.mem.forEach((a) => a.splice(0, Math.min(drop, a.length)));
-  history.temp.forEach((a) => a.splice(0, drop));
+const HISTORY_METRICS = ['util', 'mem', 'temp'];
+
+function appendHistory(row) {
+  for (const metric of HISTORY_METRICS) {
+    const series = history[metric];
+    while (series.length < row.util.length) series.push(Array(history.t.length).fill(null));
+    series.forEach((values, i) => values.push(num(row[metric]?.[i])));
+  }
+  while (history.taskMem.length < row.util.length) history.taskMem.push(Array(history.t.length).fill(null));
+  history.taskMem.forEach((values, i) => values.push(row.taskMem?.[i] ?? null));
+  history.t.push(row.t);
 }
 
-function appendTemperatures(values, count) {
-  while (history.temp.length < count) history.temp.push(Array(history.t.length).fill(null));
-  history.temp.forEach((series, i) => series.push(num(values?.[i])));
+function trimHistory(now) {
+  let drop = 0;
+  while (history.t[drop] < now - RETAIN_MS) drop++;
+  if (!drop) return;
+  history.t.splice(0, drop);
+  for (const metric of HISTORY_METRICS) history[metric].forEach((values) => values.splice(0, drop));
+  history.taskMem.forEach((values) => values.splice(0, drop));
 }
 
 async function loadHistory(file) {
@@ -565,11 +573,11 @@ async function loadHistory(file) {
   history.util.length = 0;
   history.mem.length = 0;
   history.temp.length = 0;
+  history.taskMem.length = 0;
   try {
     const raw = await readFile(file, 'utf8');
     const now = Date.now();
     const cutoff = now - RETAIN_MS;
-    const memCutoff = now - KEEP * POLL_MS;
     const kept = [];
     for (const line of raw.split('\n')) {
       if (!line) continue;
@@ -579,21 +587,63 @@ async function loadHistory(file) {
       } catch {
         continue;
       }
-      if (!row || typeof row.t !== 'number' || !Array.isArray(row.util)) continue;
+      if (!row || !Number.isFinite(row.t) || !Array.isArray(row.util)) continue;
       if (row.t < cutoff) continue;
       kept.push(line);
-      if (row.t < memCutoff) continue;
-      while (history.util.length < row.util.length) history.util.push([]);
-      row.util.forEach((v, i) => history.util[i].push(num(v)));
-      // rows written before memory was recorded keep their slot, so both series stay aligned with t
-      while (history.mem.length < row.util.length) history.mem.push([]);
-      row.util.forEach((v, i) => history.mem[i].push(num(row.mem?.[i])));
-      appendTemperatures(row.temp, row.util.length);
-      history.t.push(row.t);
+      appendHistory(row);
     }
-    trimHistory();
     await writeFile(file, kept.length ? kept.join('\n') + '\n' : '');
   } catch {}
+}
+
+function historyWindow(from, to) {
+  const start = history.t.findIndex((time) => time >= from);
+  if (start < 0 || history.t[start] > to) return { step: POLL_MS, t: [], util: [], mem: [], temp: [], taskMem: [] };
+  let end = start;
+  while (end < history.t.length && history.t[end] <= to) end++;
+
+  if (to - from <= RAW_HISTORY_MS) {
+    const result = { step: POLL_MS, t: history.t.slice(start, end) };
+    for (const metric of HISTORY_METRICS) result[metric] = history[metric].map((values) => values.slice(start, end));
+    result.taskMem = history.taskMem.map((values) => values.slice(start, end));
+    return result;
+  }
+
+  // Cap the response size and keep unobserved intervals on the time axis.
+  const step = Math.ceil((to - from + 1) / 720);
+  const count = Math.floor((to - from) / step) + 1;
+  const buckets = Array.from({ length: count }, () => []);
+  for (let i = start; i < end; i++) buckets[Math.floor((history.t[i] - from) / step)].push(i);
+  const result = { step, t: buckets.map((_, i) => from + i * step) };
+  for (const metric of HISTORY_METRICS) {
+    result[metric] = history[metric].map((values) => buckets.map((indices) => {
+      let sum = 0, seen = 0;
+      for (const i of indices) {
+        if (values[i] == null) continue;
+        sum += values[i];
+        seen++;
+      }
+      return seen ? Math.round(sum / seen * 10) / 10 : null;
+    }));
+  }
+  result.taskMem = history.taskMem.map((values, gpu) => buckets.map((indices) => {
+    let samples = 0;
+    let recorded = false;
+    const sums = new Map();
+    for (const i of indices) {
+      if (history.mem[gpu][i] == null) continue;
+      samples++;
+      if (values[i] == null) continue;
+      recorded = true;
+      for (const [key, label, mib, user] of values[i]) {
+        const previous = sums.get(key);
+        sums.set(key, [label, (previous?.[1] ?? 0) + mib, user ?? previous?.[2] ?? null]);
+      }
+    }
+    // Divide by every total-memory sample, including samples before a task started.
+    return recorded ? [...sums].map(([key, [label, sum, user]]) => [key, label, sum / samples, user]) : null;
+  }));
+  return result;
 }
 
 async function compactHistory(file = historyFile) {
@@ -613,10 +663,10 @@ async function compactHistory(file = historyFile) {
   } catch {}
 }
 
-async function persistHistory(t, util, mem, temp, file = historyFile) {
+async function persistHistory(row, file = historyFile) {
   try {
     await mkdir(DATA_DIR, { recursive: true });
-    await appendFile(file, JSON.stringify({ t, util, mem, temp }) + '\n');
+    await appendFile(file, JSON.stringify(row) + '\n');
     appendCount++;
     if (appendCount >= COMPACT_EVERY) {
       appendCount = 0;
@@ -649,7 +699,6 @@ function errorSnapshot() {
     gpus: [],
     tasks: [],
     users: [],
-    history,
     error: lastError,
   };
 }
@@ -675,8 +724,8 @@ async function sample(gen) {
 
   const procs = new Map();
   for (const line of parts.PS || []) {
-    const m = line.match(/^\s*(\d+)\s+(\S+)\s+(\d+)\s+(.*)$/);
-    if (m) procs.set(Number(m[1]), { user: m[2], elapsed: Number(m[3]), cmd: m[4].trim() });
+    const m = line.match(/^\s*(\d+)\s+(\S+)\s+(\d+)\s+(\S+(?:\s+\S+){4})\s+(.*)$/);
+    if (m) procs.set(Number(m[1]), { user: m[2], elapsed: Number(m[3]), started: m[4], cmd: m[5].trim() });
   }
 
   const byUuid = new Map(gpus.map((g) => [g.uuid, g.index]));
@@ -712,17 +761,22 @@ async function sample(gen) {
   const uptime = Number.isFinite(upSec) ? Math.round(upSec) : null;
 
   const now = Date.now();
-  const utils = gpus.map((g) => g.util);
-  const mems = gpus.map((g) => g.memUsed);
-  const temps = gpus.map((g) => g.temp);
-  appendTemperatures(temps, gpus.length);
-  history.t.push(now);
-  while (history.util.length < gpus.length) history.util.push([]);
-  while (history.mem.length < gpus.length) history.mem.push([]);
-  gpus.forEach((g, i) => { history.util[i].push(g.util); history.mem[i].push(g.memUsed); });
-  trimHistory();
+  for (const gpu of gpus) {
+    gpu.taskMem = tasks.filter((task) => task.gpu === gpu.index && task.memMib > 0).map((task) => [
+      `${task.pid}:${procs.get(task.pid).started}`, `${task.title.slice(0, 80)} #${task.pid}`, task.memMib, task.user,
+    ]);
+  }
+  const row = {
+    t: now,
+    util: gpus.map((g) => g.util),
+    mem: gpus.map((g) => g.memUsed),
+    temp: gpus.map((g) => g.temp),
+    taskMem: gpus.map((g) => g.taskMem),
+  };
+  appendHistory(row);
+  trimHistory(now);
   if (gen !== generation) return;
-  await persistHistory(now, utils, mems, temps, historyFile);
+  await persistHistory(row, historyFile);
   if (gen !== generation) return;
 
   snapshot = {
@@ -735,7 +789,6 @@ async function sample(gen) {
     gpus,
     tasks,
     users,
-    history,
     error: null,
   };
   lastError = null;
@@ -997,10 +1050,20 @@ export async function handleRequest(req) {
   });
 
   if (url.pathname === '/api/state') {
+    const now = Date.now();
+    const params = url.searchParams;
+    const span = params.has('minutes') ? Number(params.get('minutes')) * 60000 : RAW_HISTORY_MS;
+    const to = params.has('to') ? Number(params.get('to')) : now;
+    const from = params.has('from') ? Number(params.get('from')) : to - span;
+    if (!Number.isFinite(from) || !Number.isFinite(to) || from > to) {
+      return sendJson(400, { error: '时间范围无效' });
+    }
+    const selectedHistory = historyWindow(Math.max(now - RETAIN_MS, from), Math.min(now, to));
     const configured = Boolean(currentTarget());
     const body = snapshot
       ? {
           ...snapshot,
+          history: selectedHistory,
           error: lastError,
           lastGoodAt,
           configured,
@@ -1015,7 +1078,7 @@ export async function handleRequest(req) {
           gpus: [],
           tasks: [],
           users: [],
-          history,
+          history: selectedHistory,
           error: configured ? '正在采样…' : null,
           pollMs: POLL_MS,
           configured,

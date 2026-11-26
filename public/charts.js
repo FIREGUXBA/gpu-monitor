@@ -112,6 +112,25 @@
     if (!t) { t = document.createElement('div'); t.className = 'chart-tip'; t.style.cssText = 'position:absolute;pointer-events:none;padding:6px 8px;font:inherit;font-size:12px;line-height:1.35;border-radius:6px;white-space:nowrap;opacity:0;transition:opacity 120ms ease;background:var(--surface,#fff);color:var(--ink,#111);border:1px solid var(--grid,#e5e7eb)'; if (getComputedStyle(el).position === 'static') el.style.position = 'relative'; el.appendChild(t); }
     return t;
   }
+  function segmentTooltip(el, format) {
+    const tip = tooltip(el);
+    tip.classList.add('chart-tip-segment');
+    tip.setAttribute('aria-hidden', 'true');
+    return (event, segment) => {
+      if (!segment) { tip.style.opacity = 0; return; }
+      const { colour, label, user, value } = segment;
+      const pid = label.match(/ #(\d+)$/);
+      const name = pid ? label.slice(0, pid.index) : label;
+      tip.innerHTML = `<div class="chart-tip-task"><i style="background:${esc(colour)}"></i><span>${esc(name)}</span></div>`
+        + (pid ? `<div><small>用户</small> <span>${esc(user ?? '未记录')}</span></div><div><small>PID</small> <span>${esc(pid[1])}</span></div>` : '')
+        + `<div><small>显存</small> <span>${esc(format(value))}</span></div>`;
+      const bounds = el.getBoundingClientRect();
+      const left = Math.min(event.clientX - bounds.left + 10, bounds.width - tip.offsetWidth);
+      tip.style.left = `${Math.max(0, left)}px`;
+      tip.style.top = `${Math.max(8, event.clientY - tip.offsetHeight - 8) - bounds.top}px`;
+      tip.style.opacity = 1;
+    };
+  }
   function axes(g, el, { w, h, padL, padB, yt, y, labels, x, band = false, at = null, tick, avoid = null }) {
     const grid = css(el, '--grid', '#e8e8e8'), ink = css(el, '--axis-ink', '#6b6b6b'), s = g.ownerSVGElement;
     for (const v of yt) {
@@ -303,7 +322,7 @@
         const pts = sr.values.map((v, i) => (v == null ? null : [x(i), y(Math.min(v, yt.at(-1)))]));
         // step: a balance that only changes on given days holds its value until the next one
         const d = smooth ? smoothPath(pts) : pts.reduce((acc, p, i) => (p ? acc + (acc && pts[i - 1] ? (step ? `L${p[0].toFixed(1)} ${pts[i - 1][1].toFixed(1)}L` : 'L') : 'M') + p[0].toFixed(1) + ' ' + p[1].toFixed(1) : acc), '');
-        if (smooth) pts.forEach((p, i) => {
+        pts.forEach((p, i) => {
           if (p && !pts[i - 1] && !pts[i + 1]) svg('circle', { cx: p[0], cy: p[1], r: 2, fill: col }, g);
         });
         if (fill && k === 0) { const first = pts.find(Boolean), last = [...pts].reverse().find(Boolean); svg('path', { d: `${d}L${last[0]} ${y(yt[0])}L${first[0]} ${y(yt[0])}Z`, fill: col, opacity: 0.12 }, g); }
@@ -335,7 +354,7 @@
     const lg = series.length > 1 ? legendEl(series.map((sr, k) => ({ label: sr.name, w: 16, draw: (sw) => svg('line', { x1: 0, x2: 16, y1: 6, y2: 6, stroke: colourOf(sr, k), 'stroke-width': 2, 'stroke-dasharray': sr.dash ? '4 3' : null }, sw) })), legend) : null;
     return { legend: lg };
   }
-  function bars(el, { labels, values, format = fmt.int, tickFormat = null, height = 200, highlight = null, dim = [], colour, mutedColour, annotations, reference, xAt = null }) {
+  function bars(el, { labels, values, segments, format = fmt.int, formatSegment = format, tickFormat = null, height = 200, highlight = null, dim = [], colour, mutedColour, annotations, reference, xAt = null }) {
     el._fmt = format;
     const lit = (i) => highlight == null || (Array.isArray(highlight) ? highlight.includes(i) : highlight === i);
     const draw = () => {
@@ -351,9 +370,26 @@
       notesUnder(g, el, N, { padT, h, padB });
       for (const it of N.items) if (it.at != null && values[it.at] != null) it.end = y(values[it.at]) - 4;
       const main = colour || css(el, '--chart-1', '#2f6fdf'), muted = mutedColour || css(el, '--chart-muted', '#c9c9c9');
-      values.forEach((v, i) => svg('rect', { x: x(i) - bw / 2, y: y(v), width: bw, height: Math.max(0, y(0) - y(v)), fill: lit(i) ? main : muted, opacity: dim.includes(i) ? 0.45 : null, 'shape-rendering': 'crispEdges' }, g));
+      const partsByRect = new WeakMap();
+      values.forEach((v, i) => {
+        let base = 0;
+        for (const part of segments?.[i] ?? [{ value: v, colour: lit(i) ? main : muted }]) {
+          if (!(part.value > 0)) continue;
+          const top = base + part.value;
+          const rect = svg('rect', { x: x(i) - bw / 2, y: y(top), width: bw, height: y(base) - y(top), fill: part.colour, opacity: dim.includes(i) ? 0.45 : null, 'shape-rendering': 'crispEdges' }, g);
+          if (segments) partsByRect.set(rect, part);
+          base = top;
+        }
+      });
       references(g, el, reference, { y, padL, w, boxes: values.map((v, i) => ({ x0: x(i) - bw / 2, x1: x(i) + bw / 2, y0: y(v), y1: y(0) })) });
       notesOver(g, el, N, { padT, h, padB });
+      s.setAttribute('aria-label', `${labels.length} bars from ${labels[0]} to ${labels.at(-1)}; highest ${format(Math.max(...values))}`);
+      if (segments) {
+        const showTip = segmentTooltip(el, formatSegment);
+        s.addEventListener('pointermove', (e) => showTip(e, partsByRect.get(e.target)));
+        s.addEventListener('pointerleave', () => showTip());
+        return;
+      }
       // hover: the same bare tooltip as the line charts, so a bar reads its own label and value
       const tip = tooltip(el);
       const hit = svg('rect', { x: padL, y: padT, width: w - padL, height: h - padT - padB, fill: 'transparent' }, s);
@@ -367,7 +403,6 @@
         tip.style.opacity = 1;
       });
       hit.addEventListener('pointerleave', () => { tip.style.opacity = 0; });
-      s.setAttribute('aria-label', `${labels.length} bars from ${labels[0]} to ${labels.at(-1)}; highest ${format(Math.max(...values))}`);
     };
     draw(); watch(el, draw); settle(draw);
   }
@@ -653,6 +688,6 @@
     return { get svg() { return el.querySelector(':scope > svg'); }, legend: legendEl(items, legend) };
   }
   // one observer per element: charts redraw on every poll, so a fresh observer each time would pile up forever
-  function watch(el, draw) { el._draw = draw; if (!('ResizeObserver' in window) || el._ro) return; let w = el.clientWidth; el._ro = new ResizeObserver(() => { if (Math.abs(el.clientWidth - w) > 4) { w = el.clientWidth; el._draw(); } }); el._ro.observe(el); }
-  window.Charts = { line, bars, diverging, ring, barList, plan, bullet, timeline, matrix, timeStrip, ticks, fmt };
+  function watch(el, draw) { el._draw = draw; if (!('ResizeObserver' in window) || el._ro) return; let w = el.clientWidth; el._ro = new ResizeObserver(() => { if (Math.abs(el.clientWidth - w) > 4) { w = el.clientWidth; el._draw?.(); } }); el._ro.observe(el); }
+  window.Charts = { line, bars, diverging, ring, barList, plan, bullet, timeline, matrix, timeStrip, ticks, fmt, segmentTooltip };
 })();

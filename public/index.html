@@ -8,8 +8,8 @@
 <script>
   // 在首次绘制前定好主题：手动选择优先，否则跟随系统，避免闪一下另一套配色
   (() => {
-    if (location.protocol === 'gpu-monitor:' && new URLSearchParams(location.search).get('window') === 'mac') {
-      document.documentElement.dataset.window = 'mac';
+    if (location.protocol === 'gpu-monitor:') {
+      document.documentElement.dataset.window = new URLSearchParams(location.search).get('window') === 'mac' ? 'mac' : 'desktop';
     }
     try {
       const saved = localStorage.getItem('gpu-theme');
@@ -144,10 +144,35 @@
           <div class="section-title">
             <h2 id="rack-h">显卡</h2>
           </div>
-          <div class="range-tabs" role="group" aria-label="折线图时间范围">
-            <button type="button" data-range="5" aria-pressed="false">5 分钟</button>
-            <button type="button" data-range="15" aria-pressed="true">15 分钟</button>
-            <button type="button" data-range="30" aria-pressed="false">30 分钟</button>
+          <div id="historyRange" class="history-range">
+            <button type="button" id="rangeTrigger" class="range-trigger" popovertarget="rangePopover">
+              <span class="sr-only">图表时间范围，</span>
+              <span class="range-caption"><span id="rangeLabel" class="range-label">最近 15 分钟</span><span id="rangeQueryStatus" class="range-query-status"></span></span>
+              <span class="range-spinner" aria-hidden="true"></span>
+              <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+                <path d="m3.5 5.5 3.5 3.5 3.5-3.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+            </button>
+            <div id="rangePopover" popover>
+              <p id="rangeQueryError" class="modal-error" hidden>查询失败，仍显示上次的图表。请选择时间范围重试。</p>
+              <div class="range-presets" role="group" aria-label="图表时间范围">
+                <button type="button" data-range="5" aria-pressed="false">5 分钟</button>
+                <button type="button" data-range="15" aria-pressed="true">15 分钟</button>
+                <button type="button" data-range="30" aria-pressed="false">30 分钟</button>
+                <button type="button" data-range="60" aria-pressed="false">1 小时</button>
+                <button type="button" data-range="360" aria-pressed="false">6 小时</button>
+                <button type="button" data-range="720" aria-pressed="false">12 小时</button>
+                <button type="button" data-range="1440" aria-pressed="false">24 小时</button>
+                <button type="button" id="customRange" aria-expanded="false" aria-controls="rangeForm">自定义</button>
+              </div>
+              <form id="rangeForm" class="field-grid range-form" aria-describedby="rangeLimit" hidden>
+                <p id="rangeLimit" class="modal-note">最近 24 小时内</p>
+                <label>开始时间<input type="datetime-local" id="rangeFrom" required></label>
+                <label>结束时间<input type="datetime-local" id="rangeTo" required></label>
+                <p id="rangeError" class="modal-error" role="alert" hidden></p>
+                <button type="submit" class="primary-btn">应用</button>
+              </form>
+            </div>
           </div>
         </div>
         <div class="gpu-grid" id="gpuGrid"></div>
@@ -279,6 +304,16 @@
         <svg class="icon" aria-hidden="true"><use href="#i-close"/></svg>
       </button>
     </header>
+    <div id="gpuDetailRange" class="history-range">
+      <button type="button" id="gpuDetailRangeTrigger" class="range-trigger" popovertarget="rangePopover">
+        <span class="sr-only">图表时间范围，</span>
+        <span class="range-caption"><span class="range-label">最近 15 分钟</span><span class="range-query-status"></span></span>
+        <span class="range-spinner" aria-hidden="true"></span>
+        <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+          <path d="m3.5 5.5 3.5 3.5 3.5-3.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </button>
+    </div>
     <div class="detail-block">
       <p class="detail-label">利用率 %</p>
       <div id="gpuChart"></div>
