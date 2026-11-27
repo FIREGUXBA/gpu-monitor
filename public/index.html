@@ -23,6 +23,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Public+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/overlayscrollbars.css">
 <link rel="stylesheet" href="/app.css">
 </head>
 <body>
@@ -218,6 +219,44 @@
       </div>
     </div>
 
+    <section id="view-gpu" class="view gpu-detail" aria-labelledby="gpuDetailTitle" hidden>
+      <button type="button" id="gpuDetailBack" class="detail-back">
+        <svg class="icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+          <path d="M12.5 8h-9m4-4-4 4 4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        返回总览
+      </button>
+      <header class="title-row">
+        <div class="title-main">
+          <h1 id="gpuDetailTitle">GPU</h1>
+          <p class="finding" id="gpuDetailSub"></p>
+        </div>
+        <div id="gpuDetailRange" class="history-range">
+          <button type="button" id="gpuDetailRangeTrigger" class="range-trigger" popovertarget="rangePopover">
+            <span class="sr-only">图表时间范围，</span>
+            <span class="range-caption"><span class="range-label">最近 15 分钟</span><span class="range-query-status"></span></span>
+            <span class="range-spinner" aria-hidden="true"></span>
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+              <path d="m3.5 5.5 3.5 3.5 3.5-3.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </button>
+        </div>
+      </header>
+      <div class="detail-block">
+        <p class="detail-label">利用率 %</p>
+        <div id="gpuChart"></div>
+      </div>
+      <div class="detail-block" id="gpuMemBlock">
+        <p class="detail-label">显存 GB</p>
+        <div id="gpuMemChart"></div>
+      </div>
+      <div class="detail-block">
+        <p class="detail-label">温度 °C</p>
+        <div id="gpuTempChart"></div>
+        <p class="detail-label" id="gpuTempEmpty">暂无温度历史，等待采样。</p>
+      </div>
+    </section>
+
     <!-- 任务 -->
     <div id="view-tasks" class="view" hidden>
       <header class="title-row">
@@ -293,44 +332,8 @@
   </form>
 </dialog>
 
-<dialog id="gpuDialog" class="modal detail" closedby="none" aria-labelledby="gpuDetailTitle">
-  <div class="modal-card">
-    <header class="modal-head">
-      <div>
-        <h2 id="gpuDetailTitle">GPU</h2>
-        <p class="modal-sub" id="gpuDetailSub"></p>
-      </div>
-      <button type="button" class="icon-btn" id="gpuDetailClose" aria-label="关闭详情" title="关闭">
-        <svg class="icon" aria-hidden="true"><use href="#i-close"/></svg>
-      </button>
-    </header>
-    <div id="gpuDetailRange" class="history-range">
-      <button type="button" id="gpuDetailRangeTrigger" class="range-trigger" popovertarget="rangePopover">
-        <span class="sr-only">图表时间范围，</span>
-        <span class="range-caption"><span class="range-label">最近 15 分钟</span><span class="range-query-status"></span></span>
-        <span class="range-spinner" aria-hidden="true"></span>
-        <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
-          <path d="m3.5 5.5 3.5 3.5 3.5-3.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
-        </svg>
-      </button>
-    </div>
-    <div class="detail-block">
-      <p class="detail-label">利用率 %</p>
-      <div id="gpuChart"></div>
-    </div>
-    <div class="detail-block" id="gpuMemBlock">
-      <p class="detail-label">显存 GB</p>
-      <div id="gpuMemChart"></div>
-    </div>
-    <div class="detail-block">
-      <p class="detail-label">温度 °C</p>
-      <div id="gpuTempChart"></div>
-      <p class="detail-label" id="gpuTempEmpty">暂无温度历史，等待采样。</p>
-    </div>
-  </div>
-</dialog>
-
 <script src="/charts.js"></script>
+<script src="/overlayscrollbars.js"></script>
 <script src="/app.js"></script>
 <p id="live" class="sr-only" aria-live="polite"></p>
 </body>

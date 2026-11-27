@@ -267,10 +267,71 @@
   }
 
   /* ---------- GPU detail: the card opens into its own charts ---------- */
-  const gpuDialog = $('#gpuDialog');
+  const gpuDetail = $('#view-gpu');
+  const overviewView = $('#view-overview');
   const rangePopover = $('#rangePopover');
   const tempChart = $('#gpuTempChart');
   let detailGpu = null;
+  let overviewScroll = 0;
+  const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)');
+  const ZOOM_MS = 320;
+  let detailZoom = null;
+
+  function zoomTransform(base, target) {
+    return `translate(${target.left - base.left}px, ${target.top - base.top}px) scale(${target.width / base.width}, ${target.height / base.height})`;
+  }
+
+  // Pin the detail to its laid-out box so it can fly between the page and the card.
+  function pinDetail(base) {
+    gpuDetail.hidden = false;
+    gpuDetail.style.cssText = `position:fixed;left:${base.left}px;top:${base.top}px;width:${base.width}px;margin:0;padding:var(--pad);z-index:20;pointer-events:none;transform-origin:0 0;background:var(--surface);`;
+  }
+
+  function releaseDetail() {
+    detailZoom?.forEach((animation) => animation.cancel());
+    detailZoom = null;
+    gpuDetail.style.cssText = '';
+  }
+
+  // Panel and content fly separately: the content fades before the panel shrinks, so the
+  // scaled text is never squeezed into the card's shape.
+  function flyIn(base, from) {
+    const panel = gpuDetail.animate([
+      { transform: zoomTransform(base, from), borderRadius: '6px' },
+      { transform: 'none', borderRadius: '0px' },
+    ], { duration: ZOOM_MS, easing: 'cubic-bezier(0.22, 1, 0.36, 1)' });
+    const content = [...gpuDetail.children].map((el) => el.animate(
+      [{ opacity: 0 }, { opacity: 1 }],
+      { duration: ZOOM_MS * 0.6, delay: ZOOM_MS * 0.4, easing: 'linear', fill: 'backwards' },
+    ));
+    return settleZoom(panel, [panel, ...content], false);
+  }
+
+  function flyOut(base, target) {
+    const panel = gpuDetail.animate([
+      { transform: 'none', borderRadius: '0px' },
+      { transform: zoomTransform(base, target), borderRadius: '6px' },
+    ], { duration: ZOOM_MS, easing: 'cubic-bezier(0.22, 1, 0.36, 1)', fill: 'forwards' });
+    const content = [...gpuDetail.children].map((el) => el.animate(
+      [{ opacity: 1 }, { opacity: 0 }],
+      { duration: ZOOM_MS * 0.45, easing: 'linear', fill: 'forwards' },
+    ));
+    return settleZoom(panel, [panel, ...content], true);
+  }
+
+  // Only the panel's timeline decides completion; a content fade interrupted by a hidden
+  // block must not strand the pinned detail on screen.
+  function settleZoom(panel, animations, hide) {
+    detailZoom = animations;
+    panel.finished.then(() => {
+      if (detailZoom !== animations) return;
+      releaseDetail();
+      if (hide) {
+        gpuDetail.hidden = true;
+        gpuDetail.classList.remove('is-zoomed');
+      }
+    }).catch(() => {});
+  }
 
   function drawTemperature(data, pos) {
     const values = data.history?.temp?.[pos] || [];
@@ -299,7 +360,7 @@
   function drawDetail() {
     const data = state.data;
     const pos = data ? data.gpus.findIndex((g) => g.index === detailGpu) : -1;
-    if (pos < 0) return;
+    if (pos < 0) { closeDetail(); return; }
     const g = data.gpus[pos];
     const lineEl = $('#gpuChart'), barEl = $('#gpuMemChart');
     setText($('#gpuDetailTitle'), `GPU ${g.index}`);
@@ -338,55 +399,76 @@
   }
 
   function openDetail(index) {
+    releaseDetail();
     const card = state.cards.get(index);
-    const from = card ? card.getBoundingClientRect() : null;
+    const from = overviewView.hidden || !card ? null : card.getBoundingClientRect();
+    if (!overviewView.hidden) overviewScroll = window.scrollY;
     detailGpu = index;
     rangePopover.hidePopover();
     $('#gpuDetailRange').append(rangePopover);
-    gpuDialog.showModal();
+    overviewView.hidden = true;
+    gpuDetail.hidden = false;
+    gpuDetail.classList.add('is-zoomed');
+    window.scrollTo(0, 0);
     drawDetail();
-    // grow out of the card the visitor clicked, so the two read as one surface
-    if (from && !matchMedia('(prefers-reduced-motion: reduce)').matches) {
-      const to = gpuDialog.getBoundingClientRect();
-      gpuDialog.animate([
-        { transformOrigin: 'top left', transform: `translate(${from.left - to.left}px, ${from.top - to.top}px) scale(${from.width / to.width}, ${from.height / to.height})`, opacity: 0.6 },
-        { transformOrigin: 'top left', transform: 'none', opacity: 1 },
-      ], { duration: 320, easing: 'cubic-bezier(.22,1,.36,1)' });
+    if (from && !reduceMotion.matches) {
+      const base = gpuDetail.getBoundingClientRect();
+      pinDetail(base);
+      flyIn(base, from);
     }
+    $('#gpuDetailBack').focus({ preventScroll: true });
   }
 
-  // the same morph in reverse: the panel folds back into the card it came from
-  let closing = false;
-  function closeDetail() {
-    if (!gpuDialog.open || closing) return;
-    rangePopover.hidePopover();
+  function focusOverview(card) {
+    (card || $('#rangeTrigger')).focus({ preventScroll: true });
+    card?.parentElement.querySelector('.expand')?.focus({ preventScroll: true });
+  }
+
+  function closeDetail(restoreOverview = true) {
+    if (detailGpu == null) return;
     const card = state.cards.get(detailGpu);
-    if (!card || matchMedia('(prefers-reduced-motion: reduce)').matches) { gpuDialog.close(); return; }
-    const from = gpuDialog.getBoundingClientRect(), to = card.getBoundingClientRect();
-    closing = true;
-    gpuDialog.animate([
-      { transformOrigin: 'top left', transform: 'none', opacity: 1 },
-      { transformOrigin: 'top left', transform: `translate(${to.left - from.left}px, ${to.top - from.top}px) scale(${to.width / from.width}, ${to.height / from.height})`, opacity: 0 },
-    ], { duration: 220, easing: 'cubic-bezier(.4, 0, .9, .55)' }).onfinish = () => { closing = false; gpuDialog.close(); };
+    rangePopover.hidePopover();
+    $('#historyRange').append(rangePopover);
+    detailGpu = null;
+    // cancel an in-flight open animation and unpin, so the base box is the natural layout
+    releaseDetail();
+    if (!restoreOverview || !card || reduceMotion.matches) {
+      gpuDetail.hidden = true;
+      gpuDetail.classList.remove('is-zoomed');
+      if (!restoreOverview) return;
+      overviewView.hidden = false;
+      if (state.data) drawSparks(state.data, true);
+      focusOverview(card);
+      window.scrollTo(0, overviewScroll);
+      return;
+    }
+    // The overview scrolls back into place behind the shrinking detail, then the detail
+    // lands exactly on its card and fades out.
+    const base = gpuDetail.getBoundingClientRect();
+    pinDetail(base);
+    overviewView.hidden = false;
+    window.scrollTo(0, overviewScroll);
+    if (state.data) drawSparks(state.data, true);
+    const target = card.getBoundingClientRect();
+    flyOut(base, target);
+    focusOverview(card);
   }
 
-  $('#gpuDetailClose').addEventListener('click', closeDetail);
-  gpuDialog.addEventListener('click', (e) => { if (e.target === gpuDialog) closeDetail(); });
-  // closedby="none" on the dialog keeps Esc from closing it before the fold-back can run
-  gpuDialog.addEventListener('keydown', (e) => {
+  $('#gpuDetailBack').addEventListener('click', () => closeDetail());
+  $$('a[href="#/"]').forEach((link) => link.addEventListener('click', (e) => {
+    if (detailGpu == null) return;
+    e.preventDefault();
+    closeDetail();
+  }));
+  gpuDetail.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape' || rangePopover.matches(':popover-open')) return;
     e.preventDefault();
     closeDetail();
   });
-  gpuDialog.addEventListener('close', () => {
-    $('#historyRange').append(rangePopover);
-    detailGpu = null;
-    closing = false;
-  });
   const detailCharts = [$('#gpuChart'), $('#gpuMemChart'), tempChart];
   for (const el of detailCharts) {
     el.addEventListener('pointerenter', () => { el._hovered = true; });
-    el.addEventListener('pointerleave', () => { el._hovered = false; if (gpuDialog.open) drawDetail(); });
+    el.addEventListener('pointerleave', () => { el._hovered = false; if (!gpuDetail.hidden) drawDetail(); });
   }
 
   /* ---------- kpis ---------- */
@@ -661,7 +743,7 @@
     renderMachine(data);
     renderTasksView(data);
     drawSparks(data, refreshCharts);
-    if (gpuDialog.open && detailGpu != null && (refreshCharts || !detailCharts.some((el) => el._hovered))) drawDetail();
+    if (!gpuDetail.hidden && (refreshCharts || !detailCharts.some((el) => el._hovered))) drawDetail();
   }
 
   /* ---------- polling ---------- */
@@ -729,7 +811,7 @@
   const rangeLabels = $$('.range-label');
   const rangeQueryStatuses = $$('.range-query-status');
   const rangeQueryError = $('#rangeQueryError');
-  const historyCharts = $$('#gpuGrid, #gpuDialog .detail-block');
+  const historyCharts = $$('#gpuGrid, #view-gpu .detail-block');
   const presets = $$('[data-range]');
 
   function setRangeQuery(status) {
@@ -777,7 +859,7 @@
       : `最近 ${btn.textContent}`;
     rangeLabels.forEach((el) => setText(el, label));
     rangePopover.hidePopover();
-    (gpuDialog.open ? detailRangeTrigger : rangeTrigger).focus();
+    (gpuDetail.hidden ? rangeTrigger : detailRangeTrigger).focus();
     if (range === state.range && state.data?.history && !rangeControl.dataset.query) return;
     state.range = range;
     setRangeQuery('loading');
@@ -807,14 +889,14 @@
   });
 
   function applyRoute() {
+    closeDetail(false);
     state.route = location.hash.startsWith('#/tasks') ? 'tasks' : 'overview';
-    const ov = $('#view-overview');
     const tv = $('#view-tasks');
     const notice = $('#notice');
-    ov.hidden = state.route !== 'overview';
+    overviewView.hidden = state.route !== 'overview';
     tv.hidden = state.route !== 'tasks';
     // the active view's h1 is first in DOM order, so headline probes and screen readers meet it first
-    notice.after(state.route === 'tasks' ? tv : ov);
+    notice.after(state.route === 'tasks' ? tv : overviewView);
     $$('[data-nav]').forEach((a) => {
       const on = a.dataset.nav === state.route;
       if (on) a.setAttribute('aria-current', 'page');
@@ -856,7 +938,7 @@
     syncThemeButton();
     // the charts bake their stroke colours at draw time, so a theme flip needs a redraw
     if (state.data) drawSparks(state.data);
-    if (gpuDialog.open) drawDetail();
+    if (!gpuDetail.hidden) drawDetail();
   }
 
   /* ---------- SSH 登录弹窗 ---------- */
@@ -1100,6 +1182,15 @@
   window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
     if (!storedTheme()) applyTheme(systemTheme());
   });
+
+  if (document.documentElement.dataset.window && window.OverlayScrollbarsGlobal) {
+    const { OverlayScrollbars } = window.OverlayScrollbarsGlobal;
+    const scrollbarOptions = { scrollbars: { theme: 'monitor-scrollbar', autoHide: 'leave' } };
+    OverlayScrollbars(document.body, scrollbarOptions);
+    $$('dialog.modal, #rangePopover').forEach((el) => {
+      OverlayScrollbars({ target: el, elements: { viewport: el } }, scrollbarOptions);
+    });
+  }
 
   applyRoute();
   syncThemeButton();

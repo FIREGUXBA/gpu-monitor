@@ -128,9 +128,9 @@ if (!app.requestSingleInstanceLock()) {
     window = new BrowserWindow({
       title: 'GPU Monitor',
       icon: appIcon,
-      width: 1400,
-      height: 960,
-      minWidth: 680,
+      width: 900,
+      height: 600,
+      minWidth: 900,
       minHeight: 480,
       show: false,
       ...(mac && { titleBarStyle: 'hidden', titleBarOverlay: true, trafficLightPosition: { x: 14, y: 11 } }),
@@ -149,6 +149,10 @@ if (!app.requestSingleInstanceLock()) {
     if (quitting) return;
     loaded = true;
     showPanel();
+
+    if (!app.isPackaged && process.env.GPU_MONITOR_DEV !== '0') {
+      window.webContents.openDevTools({ mode: 'detach' });
+    }
 
     let checkForUpdates = startUpdater();
     if (process.platform === 'win32' && app.isPackaged && existsSync(join(process.resourcesPath, 'app-update.yml'))) {

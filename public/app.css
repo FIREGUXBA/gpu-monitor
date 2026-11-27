@@ -93,6 +93,17 @@
 
 *, *::before, *::after { box-sizing: border-box; }
 html { color-scheme: dark; -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+:root:has(dialog:modal), :root:has(dialog:modal) body {
+  overflow: hidden !important;
+}
+.monitor-scrollbar {
+  --os-size: 8px;
+  --os-padding-perpendicular: 1px;
+  --os-handle-bg: color-mix(in srgb, var(--faint) 60%, transparent);
+  --os-handle-bg-hover: var(--faint);
+  --os-handle-bg-active: var(--muted);
+  --os-handle-border-radius: 8px;
+}
 body {
   margin: 0;
   background: var(--ground);
@@ -323,7 +334,30 @@ body.paused .live .dot { background: var(--faint); }
   background: var(--raised);
   color: var(--text);
 }
-#gpuDetailRange { justify-self: end; }
+.gpu-detail { display: grid; gap: 18px; }
+/* the detail presentation fills the page padding, so the card's expansion has no gap to
+   close and the panel ends exactly at the container edge */
+.gpu-detail.is-zoomed {
+  margin: calc(-1 * var(--pad));
+  padding: var(--pad);
+  min-height: calc(100svh - var(--window-bar-height));
+  background: var(--surface);
+}
+.gpu-detail .title-row { margin-bottom: 0; }
+.detail-back {
+  justify-self: start;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 0;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font-size: var(--fs-small);
+  cursor: pointer;
+}
+.detail-back:hover { color: var(--text); }
+.detail-back .icon { width: 16px; height: 16px; }
 
 .gpu-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--gap); }
 .gpu-cell { position: relative; min-width: 0; }
@@ -538,10 +572,10 @@ body.paused .live .dot { background: var(--faint); }
   .spark { height: 104px; }
 }
 
-/* ---------- phone: the rail folds into a static top bar ---------- */
+/* ---------- narrow layout: the web rail folds into a static top bar ---------- */
 @media (max-width: 860px) {
-  .app { grid-template-columns: minmax(0, 1fr); }
-  .rail {
+  :root:not([data-window]) .app { grid-template-columns: minmax(0, 1fr); }
+  :root:not([data-window]) .rail {
     position: static;
     top: auto;
     left: auto;
@@ -558,14 +592,14 @@ body.paused .live .dot { background: var(--faint); }
     border-bottom: 1px solid var(--border);
     background: var(--ground);
   }
-  .mark { display: grid; width: 30px; height: 30px; }
-  .rail-nav { flex-direction: row; flex: 0 0 auto; margin-top: 0; justify-content: flex-start; gap: 20px; }
-  .rail-bottom { margin-top: 0; margin-left: auto; flex-direction: row; }
-  .rail-link { flex: 0 0 auto; width: auto; min-width: 0; height: 52px; flex-direction: row; gap: 7px; padding: 0 2px; border-radius: 0; }
-  .rail-link .icon { width: 16px; height: 16px; }
-  .rail-link[aria-current="page"]::after { top: auto; bottom: -2px; left: 0; right: 0; width: auto; height: 1px; }
-  .rail-label { display: block; font-size: 13px; line-height: 16px; }
-  .canvas { padding: 16px; }
+  :root:not([data-window]) .mark { display: grid; width: 30px; height: 30px; }
+  :root:not([data-window]) .rail-nav { flex-direction: row; flex: 0 0 auto; margin-top: 0; justify-content: flex-start; gap: 20px; }
+  :root:not([data-window]) .rail-bottom { margin-top: 0; margin-left: auto; flex-direction: row; }
+  :root:not([data-window]) .rail-link { flex: 0 0 auto; width: auto; min-width: 0; height: 52px; flex-direction: row; gap: 7px; padding: 0 2px; border-radius: 0; }
+  :root:not([data-window]) .rail-link .icon { width: 16px; height: 16px; }
+  :root:not([data-window]) .rail-link[aria-current="page"]::after { top: auto; bottom: -2px; left: 0; right: 0; width: auto; height: 1px; }
+  :root:not([data-window]) .rail-label { display: block; font-size: 13px; line-height: 16px; }
+  :root { --pad: 16px; }
   .title-row { flex-wrap: wrap; align-items: flex-start; gap: 10px; }
   .title-row h1 { font-size: 24px; }
   .finding { font-size: 13px; }
@@ -609,9 +643,9 @@ body.paused .live .dot { background: var(--faint); }
 }
 
 @media (max-width: 420px) {
-  .rail { gap: 12px; padding: 0 12px; }
-  .rail-nav { gap: 14px; }
-  .rail-bottom { gap: 2px; }
+  :root:not([data-window]) .rail { gap: 12px; padding: 0 12px; }
+  :root:not([data-window]) .rail-nav { gap: 14px; }
+  :root:not([data-window]) .rail-bottom { gap: 2px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -620,6 +654,7 @@ body.paused .live .dot { background: var(--faint); }
 
 /* ---------- SSH 登录弹窗 ---------- */
 .modal {
+  overscroll-behavior: contain;
   width: min(92vw, 520px);
   padding: 0;
   border: 1px solid var(--border);
@@ -629,7 +664,6 @@ body.paused .live .dot { background: var(--faint); }
   box-shadow: 0 24px 64px rgba(0, 0, 0, 0.42); /* taste-skill-ignore: a dialog floats above the page */
 }
 .modal::backdrop { background: rgba(0, 0, 0, 0.55); }
-.modal.detail { width: min(92vw, 880px); }
 .detail-block { display: grid; gap: 4px; }
 #gpuChart { --chart-1: var(--accent); }
 .chart-tip-segment { display: grid; gap: 4px; z-index: 1; width: max-content; max-width: min(290px, 100%); }

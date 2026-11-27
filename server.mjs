@@ -10,6 +10,10 @@ import { Client } from 'ssh2';
 
 const ROOT = fileURLToPath(new URL('.', import.meta.url));
 const PUBLIC = join(ROOT, 'public');
+const SCROLLBAR_ASSETS = new Map([
+  ['/overlayscrollbars.js', 'browser/overlayscrollbars.browser.es6.min.js'],
+  ['/overlayscrollbars.css', 'styles/overlayscrollbars.min.css'],
+]);
 const IS_MAC = process.platform === 'darwin';
 const IS_WIN = process.platform === 'win32';
 // 桌面入口指定平台数据目录；网页版默认使用项目下的 data/
@@ -1138,8 +1142,9 @@ export async function handleRequest(req) {
     return new Response('bad request', { status: 400 });
   }
   if (path === '/') path = '/index.html';
-  const file = resolve(PUBLIC, '.' + path);
-  if (!file.startsWith(PUBLIC + sep)) {
+  const asset = SCROLLBAR_ASSETS.get(path);
+  const file = asset ? join(ROOT, 'node_modules', 'overlayscrollbars', asset) : resolve(PUBLIC, '.' + path);
+  if (!asset && !file.startsWith(PUBLIC + sep)) {
     return new Response('forbidden', { status: 403 });
   }
   try {

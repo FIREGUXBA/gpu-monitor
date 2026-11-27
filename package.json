@@ -4,16 +4,32 @@
   "private": true,
   "dependencies": {
     "electron-updater": "6.8.11",
+    "overlayscrollbars": "2.17.1",
     "ssh2": "^1.17.0"
   },
   "devDependencies": {
     "@electron/packager": "20.3.0",
     "electron": "45.4.1",
-    "electron-builder": "26.18.0"
+    "electron-builder": "26.18.0",
+    "electronmon": "^2.0.4"
   },
   "main": "desktop.mjs",
   "scripts": {
     "start": "electron .",
+    "dev": "electronmon . server.mjs migrate.mjs windows-updater.mjs",
     "test": "node --test"
+  },
+  "electronmon": {
+    "patterns": [
+      "!data",
+      "!data/**",
+      "!dist/**",
+      "!generated_images/**",
+      "!docs/**",
+      "!test/**",
+      "!packaging/**",
+      "!**/*.md",
+      "!package-lock.json"
+    ]
   }
 }

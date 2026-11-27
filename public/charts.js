@@ -102,8 +102,10 @@
   const measure = (s, str, size = 11, weight = 400) => { const t = text(s, str, { x: -999, y: -999, 'font-size': size, 'font-weight': weight, visibility: 'hidden' }); let wd = 0; try { wd = t.getComputedTextLength(); } catch {} t.remove(); return wd > 0 ? wd : String(str).length * size * 0.56; };
   const fit = (s, str, max, size, weight) => { str = String(str); if (measure(s, str, size, weight) <= max) return str; while (str.length > 1 && measure(s, str + '\u2026', size, weight) > max) str = str.slice(0, -1); return str.trimEnd() + '\u2026'; };
   function frame(el, h) {
-    el.innerHTML = '';
+    // read the width before clearing: clearing collapses the container (its height is the
+    // svg), and any forced reflow in that gap makes the browser clamp the page scroll
     const w = Math.max(240, el.clientWidth || 600);
+    el.innerHTML = '';
     const s = svg('svg', { viewBox: `0 0 ${w} ${h}`, width: '100%', height: h, role: 'img', style: 'display:block;overflow:visible;font-variant-numeric:tabular-nums' }, el);
     return { s, w, h };
   }
