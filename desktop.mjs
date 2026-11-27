@@ -4,6 +4,7 @@ import { join, resolve } from 'node:path';
 import { app, BrowserWindow, dialog, Menu, nativeImage, nativeTheme, protocol, session, Tray } from 'electron';
 import { migrateSourceData } from './migrate.mjs';
 import { startWindowsUpdater } from './windows-updater.mjs';
+import { createShutdown } from './desktop-lifecycle.mjs';
 
 const mac = process.platform === 'darwin';
 const dataDir = resolve(process.env.GPU_MONITOR_DATA_DIR || join(
@@ -61,12 +62,18 @@ if (!app.requestSingleInstanceLock()) {
   let window;
   let loaded = false;
   let tray;
-  let quitting = false;
-  let stopped = false;
   let stopMonitor;
+  let startup;
+  const shutdown = createShutdown({
+    startup: () => startup,
+    stop: () => stopMonitor?.(),
+    cleanup: () => tray?.destroy(),
+    quit: () => app.quit(),
+  });
+  const finishQuit = (action) => shutdown.run(action);
 
   function showPanel() {
-    if (!loaded || quitting) return;
+    if (!loaded || shutdown.started) return;
     if (window.isMinimized()) window.restore();
     window.show();
     window.focus();
@@ -75,28 +82,13 @@ if (!app.requestSingleInstanceLock()) {
   app.on('second-instance', showPanel);
   app.on('activate', showPanel);
   app.on('window-all-closed', () => {});
-  function finishQuit(action) {
-    if (quitting) return;
-    quitting = true;
-    void (async () => {
-      try {
-        await startup;
-        await stopMonitor?.();
-      } finally {
-        stopped = true;
-        tray?.destroy();
-        action();
-      }
-    })().catch(console.error);
-  }
-
   app.on('before-quit', (event) => {
-    if (stopped) return;
+    if (shutdown.done) return;
     event.preventDefault();
     finishQuit(() => app.quit());
   });
 
-  const startup = (async () => {
+  startup = (async () => {
     await app.whenReady();
     const appIcon = join(app.getAppPath(), 'public', 'gpu-monitor.png');
     if (mac && !app.isPackaged) {
@@ -112,7 +104,7 @@ if (!app.requestSingleInstanceLock()) {
     const monitor = await import('./server.mjs');
     stopMonitor = monitor.stopMonitor;
     await monitor.startMonitor();
-    if (quitting) return;
+    if (shutdown.started) return;
 
     session.defaultSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
     session.defaultSession.setPermissionCheckHandler(() => false);
@@ -140,13 +132,13 @@ if (!app.requestSingleInstanceLock()) {
     window.webContents.on('will-redirect', (event) => event.preventDefault());
     window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
     window.on('close', (event) => {
-      if (quitting) return;
+      if (shutdown.started) return;
       event.preventDefault();
       window.hide();
     });
 
     await window.loadURL(origin + (mac ? '/?window=mac' : '/'));
-    if (quitting) return;
+    if (shutdown.started) return;
     loaded = true;
     showPanel();
 
@@ -200,6 +192,6 @@ if (!app.requestSingleInstanceLock()) {
     console.error(err);
 
     dialog.showErrorBox('GPU Monitor 启动失败', String(err.message || err));
-    app.quit();
+    finishQuit(() => app.quit());
   });
 }

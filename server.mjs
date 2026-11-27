@@ -1,12 +1,13 @@
 import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
-import { appendFile, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { extname, join, resolve, sep } from 'node:path';
 import { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import os from 'node:os';
 import { Client } from 'ssh2';
+import { createHistoryStore } from './history.mjs';
 
 const ROOT = fileURLToPath(new URL('.', import.meta.url));
 const PUBLIC = join(ROOT, 'public');
@@ -80,6 +81,22 @@ let ssh2Connecting = null;
 let switching = false;
 let generation = 0;
 let historyFile = HISTORY_DEFAULT;
+let snapshot = null;
+let lastError = null;
+let lastGoodAt = null;
+let cudaVersion = null;
+let cudaPending = false;
+let stopping = false;
+let pollTimer;
+let sampling;
+let cudaTask;
+let connectionChange;
+const historyStore = createHistoryStore({
+  dataDir: DATA_DIR,
+  pollMs: POLL_MS,
+  retainMs: RETAIN_MS,
+  compactEvery: COMPACT_EVERY,
+});
 
 const keyTarget = () => (active.mode === 'key' && active.host) || SSH_HOST || null;
 
@@ -252,8 +269,14 @@ async function writeConfigFile(cfg) {
     null,
     2,
   ) + '\n';
-  await writeFile(CONN_FILE, body, { mode: 0o600 });
-  savedConfig = true;
+  const tmp = CONN_FILE + '.tmp';
+  try {
+    await writeFile(tmp, body, { mode: 0o600 });
+    await rename(tmp, CONN_FILE);
+    savedConfig = true;
+  } finally {
+    await unlink(tmp).catch(() => {});
+  }
 }
 
 async function loadConnection() {
@@ -536,147 +559,15 @@ function parseGpus(lines) {
     .sort((a, b) => a.index - b.index);
 }
 
-const history = { step: POLL_MS, t: [], util: [], mem: [], temp: [], taskMem: [] };
-let snapshot = null;
-let lastError = null;
-let lastGoodAt = null;
-let cudaVersion = null;
-let cudaPending = false;
-let appendCount = 0;
-let stopping = false;
-let pollTimer;
-let sampling;
-let cudaTask;
-let connectionChange;
-
-const HISTORY_METRICS = ['util', 'mem', 'temp'];
-
-function appendHistory(row) {
-  for (const metric of HISTORY_METRICS) {
-    const series = history[metric];
-    while (series.length < row.util.length) series.push(Array(history.t.length).fill(null));
-    series.forEach((values, i) => values.push(num(row[metric]?.[i])));
-  }
-  while (history.taskMem.length < row.util.length) history.taskMem.push(Array(history.t.length).fill(null));
-  history.taskMem.forEach((values, i) => values.push(row.taskMem?.[i] ?? null));
-  history.t.push(row.t);
-}
-
-function trimHistory(now) {
-  let drop = 0;
-  while (history.t[drop] < now - RETAIN_MS) drop++;
-  if (!drop) return;
-  history.t.splice(0, drop);
-  for (const metric of HISTORY_METRICS) history[metric].forEach((values) => values.splice(0, drop));
-  history.taskMem.forEach((values) => values.splice(0, drop));
-}
-
-async function loadHistory(file) {
+// A target switch invalidates old samples and swaps the history as one operation.
+async function resetForTarget(file) {
+  generation++;
+  cudaVersion = null;
+  snapshot = null;
+  lastError = null;
+  lastGoodAt = null;
   historyFile = file;
-  history.t.length = 0;
-  history.util.length = 0;
-  history.mem.length = 0;
-  history.temp.length = 0;
-  history.taskMem.length = 0;
-  try {
-    const raw = await readFile(file, 'utf8');
-    const now = Date.now();
-    const cutoff = now - RETAIN_MS;
-    const kept = [];
-    for (const line of raw.split('\n')) {
-      if (!line) continue;
-      let row;
-      try {
-        row = JSON.parse(line);
-      } catch {
-        continue;
-      }
-      if (!row || !Number.isFinite(row.t) || !Array.isArray(row.util)) continue;
-      if (row.t < cutoff) continue;
-      kept.push(line);
-      appendHistory(row);
-    }
-    await writeFile(file, kept.length ? kept.join('\n') + '\n' : '');
-  } catch {}
-}
-
-function historyWindow(from, to) {
-  const start = history.t.findIndex((time) => time >= from);
-  if (start < 0 || history.t[start] > to) return { step: POLL_MS, t: [], util: [], mem: [], temp: [], taskMem: [] };
-  let end = start;
-  while (end < history.t.length && history.t[end] <= to) end++;
-
-  if (to - from <= RAW_HISTORY_MS) {
-    const result = { step: POLL_MS, t: history.t.slice(start, end) };
-    for (const metric of HISTORY_METRICS) result[metric] = history[metric].map((values) => values.slice(start, end));
-    result.taskMem = history.taskMem.map((values) => values.slice(start, end));
-    return result;
-  }
-
-  // Cap the response size and keep unobserved intervals on the time axis.
-  const step = Math.ceil((to - from + 1) / 720);
-  const count = Math.floor((to - from) / step) + 1;
-  const buckets = Array.from({ length: count }, () => []);
-  for (let i = start; i < end; i++) buckets[Math.floor((history.t[i] - from) / step)].push(i);
-  const result = { step, t: buckets.map((_, i) => from + i * step) };
-  for (const metric of HISTORY_METRICS) {
-    result[metric] = history[metric].map((values) => buckets.map((indices) => {
-      let sum = 0, seen = 0;
-      for (const i of indices) {
-        if (values[i] == null) continue;
-        sum += values[i];
-        seen++;
-      }
-      return seen ? Math.round(sum / seen * 10) / 10 : null;
-    }));
-  }
-  result.taskMem = history.taskMem.map((values, gpu) => buckets.map((indices) => {
-    let samples = 0;
-    let recorded = false;
-    const sums = new Map();
-    for (const i of indices) {
-      if (history.mem[gpu][i] == null) continue;
-      samples++;
-      if (values[i] == null) continue;
-      recorded = true;
-      for (const [key, label, mib, user] of values[i]) {
-        const previous = sums.get(key);
-        sums.set(key, [label, (previous?.[1] ?? 0) + mib, user ?? previous?.[2] ?? null]);
-      }
-    }
-    // Divide by every total-memory sample, including samples before a task started.
-    return recorded ? [...sums].map(([key, [label, sum, user]]) => [key, label, sum / samples, user]) : null;
-  }));
-  return result;
-}
-
-async function compactHistory(file = historyFile) {
-  try {
-    const raw = await readFile(file, 'utf8');
-    const cutoff = Date.now() - RETAIN_MS;
-    const kept = [];
-    for (const line of raw.split('\n')) {
-      if (!line) continue;
-      try {
-        if (JSON.parse(line).t >= cutoff) kept.push(line);
-      } catch {}
-    }
-    const tmp = file + '.tmp';
-    await writeFile(tmp, kept.length ? kept.join('\n') + '\n' : '');
-    await rename(tmp, file);
-  } catch {}
-}
-
-async function persistHistory(row, file = historyFile) {
-  try {
-    await mkdir(DATA_DIR, { recursive: true });
-    await appendFile(file, JSON.stringify(row) + '\n');
-    appendCount++;
-    if (appendCount >= COMPACT_EVERY) {
-      appendCount = 0;
-      await compactHistory(file);
-    }
-  } catch {}
+  await historyStore.use(file);
 }
 
 async function ensureCuda(gen) {
@@ -777,10 +668,12 @@ async function sample(gen) {
     temp: gpus.map((g) => g.temp),
     taskMem: gpus.map((g) => g.taskMem),
   };
-  appendHistory(row);
-  trimHistory(now);
+  historyStore.append(row);
+  historyStore.trim(now);
   if (gen !== generation) return;
-  await persistHistory(row, historyFile);
+  // Capture the file before the await: a switch during the write must not redirect this row.
+  const file = historyFile;
+  await historyStore.persist(row, file);
   if (gen !== generation) return;
 
   snapshot = {
@@ -863,11 +756,14 @@ async function loginPassword(input) {
 
     const oldAccount = active.mode === 'password' ? accountKey(active) : null;
     const newAccount = accountKey(cfg);
+    const previousPassword = password;
     await secretSet(newAccount, pw);
     try {
       await writeConfigFile({ ...cfg, mode: 'password' });
     } catch (err) {
-      await secretDelete(newAccount);
+      // Re-saving the same account must not destroy its previous credential.
+      if (oldAccount === newAccount && previousPassword != null) await secretSet(newAccount, previousPassword).catch(() => {});
+      else await secretDelete(newAccount);
       throw err;
     }
 
@@ -890,12 +786,7 @@ async function loginPassword(input) {
     probe.on('error', drop);
     if (oldAccount && oldAccount !== newAccount) await secretDelete(oldAccount);
 
-    generation++;
-    cudaVersion = null;
-    snapshot = null;
-    lastError = null;
-    lastGoodAt = null;
-    await loadHistory(historyFileFor({ ...active, mode: 'password' }));
+    await resetForTarget(historyFileFor({ ...active, mode: 'password' }));
     return { ok: true, mode: 'password', target: targetLabel(), host: hostname, gpus: gpus.length };
   } catch (err) {
     if (probe) {
@@ -936,12 +827,7 @@ async function loginKey(input) {
     active.fingerprint = null;
     if (oldAccount) await secretDelete(oldAccount);
 
-    generation++;
-    cudaVersion = null;
-    snapshot = null;
-    lastError = null;
-    lastGoodAt = null;
-    await loadHistory(historyFileFor({ mode: 'key', host: alias }));
+    await resetForTarget(historyFileFor({ mode: 'key', host: alias }));
     return { ok: true, mode: 'key', target: targetLabel(), host: hostname, gpus: gpus.length };
   } finally {
     switching = false;
@@ -989,12 +875,7 @@ async function logout() {
     active.fingerprint = null;
     savedConfig = false;
     password = null;
-    generation++;
-    cudaVersion = null;
-    snapshot = null;
-    lastError = null;
-    lastGoodAt = null;
-    await loadHistory(HISTORY_DEFAULT);
+    await resetForTarget(HISTORY_DEFAULT);
     return { ok: true, target: targetLabel() };
   } finally {
     switching = false;
@@ -1005,7 +886,7 @@ async function logout() {
 
 export async function startMonitor() {
   await loadConnection();
-  await loadHistory(historyFile);
+  await historyStore.use(historyFile);
   schedulePoll(0);
 }
 
@@ -1062,7 +943,7 @@ export async function handleRequest(req) {
     if (!Number.isFinite(from) || !Number.isFinite(to) || from > to) {
       return sendJson(400, { error: '时间范围无效' });
     }
-    const selectedHistory = historyWindow(Math.max(now - RETAIN_MS, from), Math.min(now, to));
+    const selectedHistory = historyStore.window(Math.max(now - RETAIN_MS, from), Math.min(now, to));
     const configured = Boolean(currentTarget());
     const body = snapshot
       ? {

@@ -6,17 +6,10 @@
 //   --chart-span (the opacity of a shaded span: about .06 on light, .12 on dark), --chart-track (a time strip's track),
 //   --grid, --axis-ink, --ink, --surface, --raised, --rule, --negative
 // Usage (after this file loads):
-//   Charts.line(el, { labels: ['1 Oct', …], series: [{ name: 'Requests', values: [...] }], format: Charts.fmt.compact })
+//   Charts.line(el, { labels: ['1 Oct', …], series: [{ name: 'Requests', values: [...] }], format })
 //   Charts.bars(el, { labels, values, highlight: 6, format })        one bar (or [indices]) may carry the accent; dim: [indices]
-//   Charts.diverging(el, { labels, up, down, above: 'Sold', below: 'Bought', mark: [3, 9], markLabel: 'Car charged' })
-//   Charts.ring(el, { value: 0.72, label: '72%', sub: 'of capacity' }) a progress ring with its total inside
-//   Charts.barList(el, [{ label: 'Berlin', value: 412 }, …], { format, thin })  a ranked list where the row is the bar
-//   Charts.plan(el, [{ label: 'Groceries', planned: 600, spent: 412, committed: 60 }, …], { scale: 'row' | 'plan' })  planned against spent
-//   Charts.bullet(el, [{ label: 'Bonds', value: 0.31, target: 0.25 }, …])   share against a target
-//   Charts.timeline(el, rows, kinds, { days, today, weekends })      who is away when, each kind of booking its own mark
-//   Charts.matrix(el, rows, { cols, comfort: 2, today })             slack against a minimum, team by day
-//   Charts.timeStrip(el, rows, { open: '08:00', close: '15:00', compareLabel: 'Last Sunday' })  when, within the day
-// line, bars and diverging take annotations: [{ at: index, label: 'Deploy a3f09c1', short: 'a3f09c1' }] or spans
+//   Charts.segmentTooltip(el, format)                                pointer handler for stacked bar segments
+// line and bars take annotations: [{ at: index, label: 'Deploy a3f09c1', short: 'a3f09c1' }] or spans
 // [{ from, to, label: 'Cloud' }]. Their labels sit in rows above the plot, measured once the fonts have loaded, and no
 // leader line crosses another label; the rows are reserved only when a label exists. reference: { value, label }, its
 // label set where no series passes.
@@ -24,9 +17,8 @@
 // with todayLabel: 'Now 20:34' (set clear of the line); endLabel: true (the last value at the line's end); max: caps a
 // flat series with one spike (the peak is labelled); yTicks: fixed ticks for a bounded quantity (0–100%); tickFormat:
 // axis labels apart from the tooltip format; xAt: the indices to label. Without xAt the x labels keep one step.
-// diverging, timeline, matrix and timeStrip return { svg, legend }, and line returns { legend } for two series or more:
-// the legend is drawn from the same style objects as the marks, so a swatch is always the mark scaled down. Put it in
-// the card's header, or pass legend: element (or a selector) to have it filled.
+// line returns { legend } for two series or more: the legend is drawn from the same style objects as the marks, so a
+// swatch is always the mark scaled down. Put it in the card's header, or pass legend: element (or a selector).
 // Numbers follow the page's language (<html lang>). Every chart gets role="img" and an aria-label that states what it shows.
 (() => {
   const NS = 'http://www.w3.org/2000/svg', MINUS = '\u2212', ROW = 14, LANE = (rows) => 8 + rows * ROW + (rows ? 4 : 0);
@@ -89,18 +81,8 @@
     const out = []; for (let i = pick.s; i < n; i += pick.k) out.push(i);
     return out;
   }
-  // colours: tokens resolved to rgb, so a mark can be mixed with the surface (a pale fill, a darker step)
-  const swatchProbe = document.createElement('span'); swatchProbe.style.display = 'none';
-  const rgb = (el, value) => {
-    el.appendChild(swatchProbe); swatchProbe.style.color = ''; swatchProbe.style.color = value;
-    const c = getComputedStyle(swatchProbe).color; swatchProbe.remove();
-    const m = c.match(/-?[\d.]+/g); if (!m || m.length < 3) return null;
-    return c.startsWith('color(') ? m.slice(0, 3).map((v) => Math.round(+v * 255)) : m.slice(0, 3).map(Number);
-  };
-  const mix = (el, a, b, t) => { const p = rgb(el, a), q = rgb(el, b); return p && q ? `rgb(${p.map((v, i) => Math.round(v * t + q[i] * (1 - t))).join(',')})` : a; };
   // text width, measured in the chart's own face (falls back to an estimate when the chart is hidden)
   const measure = (s, str, size = 11, weight = 400) => { const t = text(s, str, { x: -999, y: -999, 'font-size': size, 'font-weight': weight, visibility: 'hidden' }); let wd = 0; try { wd = t.getComputedTextLength(); } catch {} t.remove(); return wd > 0 ? wd : String(str).length * size * 0.56; };
-  const fit = (s, str, max, size, weight) => { str = String(str); if (measure(s, str, size, weight) <= max) return str; while (str.length > 1 && measure(s, str + '\u2026', size, weight) > max) str = str.slice(0, -1); return str.trimEnd() + '\u2026'; };
   function frame(el, h) {
     // read the width before clearing: clearing collapses the container (its height is the
     // svg), and any forced reflow in that gap makes the browser clamp the page scroll
@@ -237,20 +219,6 @@
       text(g, r.label, { x: b.x0, y: b.base, 'font-size': 11, fill: ink });
     }
   }
-  // One style object per kind of mark draws both the mark and its legend swatch, so the two cannot drift apart.
-  function paintRect(parent, st, x, y, w, h, r = 0) {
-    let fill = st.fill || 'none';
-    if (st.hatch) {
-      const s = parent.ownerSVGElement || parent, id = 'h' + Math.random().toString(36).slice(2, 8);
-      const p = svg('pattern', { id, width: 5, height: 5, patternUnits: 'userSpaceOnUse', patternTransform: 'rotate(45)' }, svg('defs', {}, s));
-      svg('rect', { width: 5, height: 5, fill: st.fill }, p); svg('line', { x1: 0, y1: 0, x2: 0, y2: 5, stroke: st.hatch, 'stroke-width': 1.2 }, p);
-      fill = `url(#${id})`;
-    }
-    const inset = st.stroke ? (st.width || 1) / 2 : 0;
-    const n = svg('rect', { x: x + inset, y: y + inset, width: Math.max(0, w - inset * 2), height: Math.max(0, h - inset * 2), rx: r, fill, stroke: st.stroke, 'stroke-width': st.stroke ? st.width || 1 : null, 'stroke-dasharray': st.dash, opacity: st.opacity, 'shape-rendering': r ? null : 'crispEdges' }, parent);
-    if (st.edge) svg('rect', { x, y, width: 3, height: h, rx: Math.min(r, 1.5), fill: st.edge }, parent);
-    return n;
-  }
   const legendCss = ':where(.chart-legend){list-style:none;margin:0;padding:0;display:flex;flex-wrap:wrap;gap:4px 14px;font-size:12px;line-height:16px;color:var(--muted,#5f6368)}:where(.chart-legend li){display:inline-flex;align-items:center;gap:6px;white-space:nowrap}:where(.chart-legend svg){flex:none;overflow:visible}@media (max-width:480px){:where(.chart-legend){display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}}';
   function legendEl(items, target) {
     if (!document.getElementById('charts-legend-css')) { const st = document.createElement('style'); st.id = 'charts-legend-css'; st.textContent = legendCss; document.head.appendChild(st); }
@@ -263,7 +231,6 @@
     if (t) t.replaceChildren(ul);
     return ul;
   }
-  const rectSwatch = (st, w = 14, h = 10, r = 2) => (sw) => paintRect(sw, st, 0, (12 - h) / 2, w, h, r);
   // charts are laid out with measured text: draw again once the page's fonts have arrived, and only while they
   // are still loading — a listener added after that would never fire and never go away
   function settle(draw) { if (document.fonts && document.fonts.status === 'loading') { document.fonts.ready.then(draw); document.fonts.addEventListener?.('loadingdone', draw, { once: true }); } }
@@ -408,288 +375,7 @@
     };
     draw(); watch(el, draw); settle(draw);
   }
-  // Two directions on one scale: what went out above the zero line and what came in below it (sold and bought,
-  // income and spend). The axis says which is which, with signed ticks and a caption on each side of zero.
-  // mark: [indices] draws those periods in a second tone with their own legend entry (the nights the car charged).
-  function diverging(el, { labels, up, down, values, above = 'Above', below = 'Below', mark = [], markLabel = null, markSide = 'below', partial = null, format = fmt.int, tickFormat = null, height = 200, annotations, reference, xAt = null, legend = null }) {
-    if (values) { up = values.map((v) => Math.max(0, v || 0)); down = values.map((v) => Math.max(0, -(v || 0))); }
-    up = up || labels.map(() => 0); down = down || labels.map(() => 0);
-    const st = { above: { fill: css(el, '--chart-1', '#2f6fdf') }, below: { fill: css(el, '--chart-muted', '#c9c9c9') }, mark: { fill: css(el, '--chart-mark', css(el, '--ink', '#111')) } };
-    const marked = (i, side) => mark.includes(i) && (markSide === 'both' || markSide === side);
-    const tick = (v) => (v > 0 ? '+' : v < 0 ? MINUS : '') + (tickFormat || format)(Math.abs(v));
-    const draw = () => {
-      const { s, w, h } = frame(el, heightOf(height));
-      const hiUp = Math.max(0, ...up), hiDown = Math.max(0, ...down);
-      const yt = ticks(-hiDown, hiUp || 1, 4); const stp = yt[1] - yt[0]; if (hiDown > 0 && yt[0] >= -hiDown) yt.unshift(+(yt[0] - stp).toFixed(10));
-      const padL = 12 + Math.max(...yt.map((v) => measure(s, tick(v), 12))), padB = 26;
-      const band = (w - padL) / labels.length, bw = Math.max(2, band * 0.62);
-      const x = (i) => padL + band * i + band / 2;
-      // the caption for the upper side opens the label rows above the plot; the lower one sits under the plot, at left
-      const N = prepNotes(s, annotations, x, w, [{ fixed: padL, glyph: 'up', label: above }]), padT = LANE(N.rows);
-      const y = (v) => padT + (h - padT - padB) * (1 - (v - yt[0]) / (yt.at(-1) - yt[0]));
-      const g = svg('g', {}, s), ink = css(el, '--axis-ink', '#6b6b6b');
-      const bwid = measure(s, below, 11) + 9;
-      axes(g, el, { w, h, padL, padB, yt, y, labels, x, band: true, at: xAt, tick, avoid: [padL, padL + bwid] });
-      svg('path', { d: `M${padL} ${h - padB + 11}l3 6l3 -6z`, fill: ink }, g); text(g, below, { x: padL + 9, y: h - padB + 18, 'font-size': 11, fill: ink });
-      notesUnder(g, el, N, { padT, h, padB });
-      for (const it of N.items) if (it.at != null) it.end = y(up[it.at] || 0) - 4;
-      labels.forEach((lab, i) => {
-        const o = partial === i ? 0.5 : null;
-        if (up[i] > 0) { const r = paintRect(g, { ...(marked(i, 'above') ? st.mark : st.above), opacity: o }, x(i) - bw / 2, y(up[i]), bw, Math.max(0, y(0) - y(up[i]) - 1)); titled(r, `${lab}: ${above} ${format(up[i])}`, {}); }
-        if (down[i] > 0) { const r = paintRect(g, { ...(marked(i, 'below') ? st.mark : st.below), opacity: o }, x(i) - bw / 2, y(0) + 1, bw, Math.max(0, y(-down[i]) - y(0) - 1)); titled(r, `${lab}: ${below} ${format(down[i])}`, {}); }
-      });
-      svg('line', { x1: padL, x2: w, y1: y(0), y2: y(0), stroke: ink, 'stroke-width': 1, opacity: 0.8, 'shape-rendering': 'crispEdges' }, g);
-      references(g, el, reference, { y, padL, w, boxes: labels.map((_, i) => ({ x0: x(i) - bw / 2, x1: x(i) + bw / 2, y0: y(up[i]), y1: y(-down[i]) })) });
-      notesOver(g, el, N, { padT, h, padB });
-      s.setAttribute('aria-label', `${above} above the line and ${below} below it, ${labels[0]} to ${labels.at(-1)}`);
-    };
-    draw(); watch(el, draw); settle(draw);
-    const items = [];
-    if (up.some((v) => v > 0)) items.push({ label: above, draw: rectSwatch(st.above) });
-    if (down.some((v) => v > 0)) items.push({ label: below, draw: rectSwatch(st.below) });
-    if (mark.length && markLabel) items.push({ label: markLabel, draw: rectSwatch(st.mark) });
-    return { get svg() { return el.querySelector(':scope > svg'); }, legend: legendEl(items, legend) };
-  }
-  function ring(el, { value, label, sub, size = 132, stroke = 8, colour }) {
-    el.innerHTML = '';
-    const r = (size - stroke) / 2, c = 2 * Math.PI * r, v = Math.max(0, Math.min(1, value));
-    const wrap = document.createElement('div'); wrap.style.cssText = `position:relative;width:${size}px;height:${size}px`;
-    const s = svg('svg', { viewBox: `0 0 ${size} ${size}`, width: size, height: size, role: 'img', 'aria-label': `${label}${sub ? ' ' + sub : ''}` }, wrap);
-    svg('circle', { cx: size / 2, cy: size / 2, r, fill: 'none', stroke: css(el, '--grid', '#e8e8e8'), 'stroke-width': stroke }, s);
-    svg('circle', { cx: size / 2, cy: size / 2, r, fill: 'none', stroke: colour || css(el, '--chart-1', '#2f6fdf'), 'stroke-width': stroke, 'stroke-dasharray': `${c * v} ${c}`, transform: `rotate(-90 ${size / 2} ${size / 2})` }, s);
-    const t = document.createElement('div'); t.style.cssText = 'position:absolute;inset:0;display:grid;place-content:center;text-align:center;font-variant-numeric:tabular-nums';
-    t.innerHTML = `<div style="font-size:${Math.round(size / 5.5)}px;font-weight:600;line-height:1">${esc(label)}</div>${sub ? `<div style="font-size:12px;opacity:.7;margin-top:4px">${esc(sub)}</div>` : ''}`;
-    wrap.appendChild(t); el.appendChild(wrap);
-  }
-  // A ranked list. By default the row's fill is the bar (a one-figure list); thin: true puts a 2px grey bar under each
-  // label instead, ink for the top item, for a ranked list of money in a narrow card.
-  function barList(el, rows, { format = fmt.int, colour, thin = false } = {}) {
-    el.innerHTML = '';
-    const max = Math.max(...rows.map((r) => r.value)) || 1;
-    const list = document.createElement('ol'); list.style.cssText = `list-style:none;margin:0;padding:0;display:grid;gap:${thin ? 10 : 2}px;font-variant-numeric:tabular-nums`;
-    const valueCol = Math.max(...rows.map((r) => String(format(r.value)).length)) + 1;
-    rows.forEach((r, k) => {
-      const li = document.createElement('li'); li.style.cssText = 'display:grid;grid-template-columns:minmax(0,1fr) ' + valueCol + 'ch;align-items:center;column-gap:12px';
-      const a = document.createElement('span'); a.textContent = r.label; a.style.cssText = 'position:relative;display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis';
-      const b = document.createElement('span'); b.textContent = format(r.value); b.style.cssText = 'font-weight:500;text-align:right';
-      if (thin) {
-        const bar = document.createElement('span'); bar.style.cssText = `grid-column:1 / -1;height:2px;margin-top:4px;width:${(r.value / max) * 100}%;background:${k === 0 ? colour || 'var(--ink,#111)' : 'var(--chart-muted,#c9c9c9)'}`;
-        li.append(a, b, bar);
-      } else {
-        const track = document.createElement('span'); track.style.cssText = 'position:relative;padding:10px 12px;border-radius:6px;isolation:isolate;min-width:0';
-        const bar = document.createElement('span'); bar.style.cssText = `position:absolute;inset:0 auto 0 0;width:${(r.value / max) * 100}%;background:${colour || 'var(--bar-fill, color-mix(in srgb, var(--chart-1, #2f6fdf) 12%, transparent))'};border-radius:inherit;z-index:-1`;
-        track.append(bar, a); li.append(track, b);
-      }
-      list.appendChild(li);
-    });
-    el.appendChild(list);
-  }
-  // Planned against spent: the track is the plan, the fill what is spent, a lighter segment what is
-  // already committed (bills to come), and an overrun past the track's end in the negative colour.
-  // One row per category: label and figures on one line, the 8px track under them.
-  function plan(el, rows, { format = fmt.money('EUR', 0), scale = 'row', note = (r) => r.spent > r.planned ? `${format(r.spent - r.planned)} over` : `${format(r.planned - r.spent - (r.committed || 0))} left` } = {}) {
-    el.innerHTML = '';
-    const list = document.createElement('ul'); list.style.cssText = 'list-style:none;margin:0;padding:0;display:grid;gap:14px;font-variant-numeric:tabular-nums';
-    const max = Math.max(...rows.map((r) => Math.max(r.planned, r.spent + (r.committed || 0))));
-    for (const r of rows) {
-      const over = r.spent > r.planned;
-      const li = document.createElement('li');
-      const top = document.createElement('div'); top.style.cssText = 'display:flex;justify-content:space-between;gap:12px;margin-bottom:6px';
-      top.innerHTML = `<span>${esc(r.label)}</span><span><b style="font-weight:500">${esc(format(r.spent))}</b> <span style="color:var(--muted,#5f6368)">of ${esc(format(r.planned))} · </span><span style="color:${over ? 'var(--negative,#c4242a)' : 'var(--muted,#5f6368)'}">${esc(note(r))}</span></span>`;
-      // scale 'row': each track is full width and shows the share used (rows in a grid compare); 'plan': as long as its plan
-      const room = over ? 100 / (1 + Math.max(0.06, (r.spent - r.planned) / r.planned)) : 100;
-      const track = document.createElement('div'); track.style.cssText = 'position:relative;height:8px;border-radius:999px;background:var(--rule,#eceeef);overflow:visible;width:' + (scale === 'plan' ? (r.planned / max) * room : room) + '%';
-      const pct = (v) => (v / r.planned) * 100;
-      const spent = Math.min(r.spent, r.planned);
-      track.innerHTML = `<span style="position:absolute;inset:0 auto 0 0;width:${pct(spent)}%;border-radius:999px;background:var(--chart-1,#2f6fdf)"></span>`
-        + (r.committed ? `<span style="position:absolute;top:0;bottom:0;left:${pct(spent)}%;width:${Math.min(pct(r.committed), 100 - pct(spent))}%;background:var(--chart-1,#2f6fdf);opacity:.35"></span>` : '')
-        + (over ? `<span style="position:absolute;top:-3px;bottom:-3px;left:100%;width:1px;background:var(--text,#111)"></span><span style="position:absolute;top:0;bottom:0;left:calc(100% + 2px);width:max(12px, ${pct(r.spent - r.planned)}%);border-radius:0 999px 999px 0;background:var(--negative,#c4242a)"></span>` : '');
-      track.setAttribute('role', 'img'); track.setAttribute('aria-label', `${r.label}: ${format(r.spent)} of ${format(r.planned)}${r.committed ? `, ${format(r.committed)} committed` : ''}${over ? ', over plan' : ''}`);
-      li.append(top, track); list.appendChild(li);
-    }
-    el.appendChild(list);
-  }
-  // Share against a target: one row per part, the current share as a bar and a 1px tick at the target,
-  // so drift reads at a glance (never two stacked bars to compare).
-  function bullet(el, rows, { format = fmt.pct(1), max = Math.max(...rows.map((r) => Math.max(r.value, r.target))) * 1.15 } = {}) {
-    el.innerHTML = '';
-    const list = document.createElement('ul'); list.style.cssText = 'list-style:none;margin:0;padding:0;display:grid;gap:12px;font-variant-numeric:tabular-nums';
-    for (const r of rows) {
-      const drift = r.value - r.target;
-      const li = document.createElement('li'); li.style.cssText = 'display:grid;grid-template-columns:minmax(90px,30%) 1fr auto;align-items:center;gap:12px';
-      li.innerHTML = `<span>${esc(r.label)}</span><span style="position:relative;height:10px;background:var(--rule,#eceeef);border-radius:2px"><span style="position:absolute;inset:0 auto 0 0;width:${(r.value / max) * 100}%;background:var(--chart-1,#2f6fdf);border-radius:2px"></span><span style="position:absolute;top:-4px;bottom:-4px;left:${(r.target / max) * 100}%;width:2px;margin-left:-1px;background:var(--text,#111)"></span></span><span><b style="font-weight:500">${esc(format(r.value))}</b> <span style="color:${Math.abs(drift) >= (r.tolerance ?? 0.02) ? 'var(--negative,#c4242a)' : 'var(--muted,#5f6368)'}">${drift >= 0 ? '+' : '−'}${esc(format(Math.abs(drift)))} vs ${esc(format(r.target))}</span></span>`;
-      li.setAttribute('aria-label', `${r.label}: ${format(r.value)}, target ${format(r.target)}`);
-      list.appendChild(li);
-    }
-    el.appendChild(list);
-  }
-  // shared by the row charts (timeline, matrix, time strip): a label column with an optional grey subline.
-  // A subline needs a 40-44px row pitch; one-line labels sit on 32px.
-  function rowLabel(g, s, el, r, { y0, pitch, lw }) {
-    const ink = css(el, '--ink', '#111'), muted = css(el, '--axis-ink', '#6b6b6b');
-    if (r.sub) { text(g, fit(s, r.label, lw - 12, 14), { x: 0, y: y0 + pitch / 2 - 3, 'font-size': 14, fill: ink }); text(g, fit(s, r.sub, lw - 12, 12), { x: 0, y: y0 + pitch / 2 + 13, 'font-size': 12, fill: muted }); }
-    else text(g, fit(s, r.label, lw - 12, 14), { x: 0, y: y0 + pitch / 2 + 5, 'font-size': 14, fill: ink });
-  }
-  const dayText = (d) => (typeof d === 'object' && d ? d.label : String(d));
-  // day headers: the full label when every one fits its column, else the short form ('19'), else every k-th short
-  // label with today always shown and its neighbours left out, so no two headers ever touch
-  function dayHeads(g, s, el, days, { x0, cw, y, today }) {
-    const ink = css(el, '--ink', '#111'), muted = css(el, '--axis-ink', '#6b6b6b');
-    const full = days.map(dayText), short = days.map((d) => (typeof d === 'object' && d ? d.short || dayText(d) : dayText(d).split(' ').at(-1)));
-    const wide = (labs) => Math.max(...labs.map((t) => measure(s, t, 12))) + 6;
-    const labs = wide(full) <= cw ? full : short, k = Math.max(1, Math.ceil(wide(labs) / cw));
-    labs.forEach((t, i) => {
-      if (i !== today && (i % k || (today != null && k > 1 && Math.abs(i - today) < k))) return;
-      text(g, t, { x: x0 + i * cw + cw / 2, y, 'text-anchor': 'middle', 'font-size': 12, 'font-weight': i === today ? 600 : 400, fill: i === today ? ink : muted });
-    });
-  }
-  // The style of each kind of booking: a pale fill, a 1px diagonal hatch, a darker grey step, an outline, or the one
-  // chart hue for the screen's main data element. tone: 'negative' turns the edge and the label red (it needs a decision).
-  function kindStyle(el, k = {}) {
-    const ink = css(el, '--ink', '#111'), surface = css(el, '--surface', '#fff'), neg = css(el, '--negative', '#c4242a'), hue = k.colour || css(el, '--chart-1', '#2f6fdf');
-    const tone = k.tone === 'negative' ? { stroke: neg, width: 1.5 } : {};
-    const dash = k.dash ? { dash: '3 2' } : {};
-    if (k.mark === 'hatch') return { fill: mix(el, ink, surface, 0.04), hatch: mix(el, ink, surface, 0.32), ...tone, ...dash };
-    if (k.mark === 'step') return { fill: mix(el, ink, surface, 0.24), ...tone, ...dash };
-    if (k.mark === 'outline') return { fill: surface, stroke: mix(el, ink, surface, 0.55), width: 1, ...tone, ...dash };
-    if (k.mark === 'hue') return { fill: mix(el, hue, surface, 0.18), edge: hue, ...tone, ...dash };
-    return { fill: mix(el, ink, surface, 0.12), ...tone, ...dash };
-  }
-  // Who is away when: people (or rooms, vans) down the left, days across, a bar per booking told apart by its kind.
-  //   rows: [{ label: 'Lena Hoffmann', sub: 'Product design · Berlin', bars: [{ from: 3, to: 7, kind: 'holiday', label, note }] }]
-  //         and { group: 'Brand' } rows for a team subheader
-  //   kinds: { holiday: { label: 'Holiday', mark: 'fill' | 'hatch' | 'step' | 'outline' | 'hue', code: 'H', tone, dash } }
-  //   days: ['Mon 19', …] or [{ label: 'Mon 19', short: '19' }]; weekends: [indices]; today: index;
-  //   holidays: [{ day: index, label: 'All Saints’ Day (Lisbon)' }]; onSelect(bar, row) makes the bars buttons.
-  // A label that does not fit its bar becomes the kind's code inside it, then goes after the bar's end (never into the
-  // days before it), and is always in the bar's tooltip.
-  function timeline(el, rows, kinds = {}, { days = [], weekends = [], today = null, holidays = [], labelWidth = null, rowHeight = null, barHeight = 22, onSelect = null, legend = null, extras = true } = {}) {
-    const draw = () => {
-      const pitch = rowHeight || (rows.some((r) => r.sub) ? 44 : 32), head = 30, groupH = 30;
-      const height = head + rows.reduce((a, r) => a + (r.group ? groupH : pitch), 0) + 2;
-      const { s, w, h } = frame(el, height);
-      const lw = labelWidth || Math.round(Math.min(220, Math.max(w < 480 ? 96 : 120, w * 0.2)));
-      const cw = (w - lw) / Math.max(1, days.length), col = (i) => lw + i * cw;
-      const ink = css(el, '--ink', '#111'), muted = css(el, '--axis-ink', '#6b6b6b'), rule = css(el, '--rule', '#f0f0f0'), raised = css(el, '--raised', '#f4f5f6'), hue = css(el, '--chart-1', '#2f6fdf');
-      const g = svg('g', {}, s);
-      // weekends one tone step darker, faint day lines, the day header (today in ink)
-      for (const i of weekends) svg('rect', { x: col(i), y: head, width: cw, height: h - head, fill: raised }, g);
-      for (let i = 0; i <= days.length; i++) svg('line', { x1: col(i), x2: col(i), y1: head, y2: h, stroke: rule, 'stroke-width': 1, 'shape-rendering': 'crispEdges' }, g);
-      dayHeads(g, s, el, days, { x0: lw, cw, y: head - 10, today });
-      for (const hd of holidays) { const c = svg('circle', { cx: col(hd.day) + cw / 2, cy: head - 3, r: 2, fill: muted }, g); titled(c, hd.label, {}); }
-      if (today != null) svg('line', { x1: col(today) + cw / 2, x2: col(today) + cw / 2, y1: head, y2: h, stroke: hue, 'stroke-width': 1, 'shape-rendering': 'crispEdges' }, g);
-      let y0 = head;
-      for (const r of rows) {
-        if (r.group) { svg('line', { x1: 0, x2: w, y1: y0 + 0.5, y2: y0 + 0.5, stroke: rule, 'stroke-width': 1 }, g); text(g, r.group, { x: 0, y: y0 + 20, 'font-size': 12, 'font-weight': 500, fill: muted }); y0 += groupH; continue; }
-        rowLabel(g, s, el, r, { y0, pitch, lw });
-        const bs = (r.bars || []).filter((b) => b.to >= 0 && b.from < days.length).sort((a, b) => a.from - b.from);
-        bs.forEach((b, k) => {
-          const kind = kinds[b.kind] || {}, st = kindStyle(el, kind);
-          const x0 = col(Math.max(0, b.from)) + 2, x1 = col(Math.min(days.length - 1, b.to) + 1) - 2, by = y0 + (pitch - barHeight) / 2;
-          const grp = svg('g', onSelect ? { tabindex: 0, role: 'button', style: 'cursor:pointer' } : {}, g);
-          paintRect(grp, st, x0, by, x1 - x0, barHeight, 4);
-          const label = b.label ?? kind.label ?? '', code = b.code ?? kind.code, tw = measure(s, label, 12), labInk = kind.tone === 'negative' ? css(el, '--negative', '#c4242a') : ink;
-          const next = bs[k + 1] ? col(Math.max(0, bs[k + 1].from)) : w;
-          // over a hatch the label keeps a halo of the bar's own fill, so the lines never run through the words
-          const halo = st.hatch ? { stroke: st.fill, 'stroke-width': 4, 'stroke-linejoin': 'round', 'paint-order': 'stroke' } : {};
-          if (label && tw + 16 <= x1 - x0) text(grp, label, { x: x0 + 8 + (st.edge ? 2 : 0), y: by + barHeight / 2 + 4, 'font-size': 12, fill: labInk, ...halo });
-          else if (code && measure(s, code, 12) + 8 <= x1 - x0) text(grp, code, { x: (x0 + x1) / 2, y: by + barHeight / 2 + 4, 'text-anchor': 'middle', 'font-size': 12, fill: labInk, ...halo });
-          else if (label && x1 + 6 + tw <= Math.min(next - 6, w)) text(grp, label, { x: x1 + 6, y: by + barHeight / 2 + 4, 'font-size': 12, fill: kind.tone === 'negative' ? labInk : muted });
-          titled(grp, `${r.label}: ${label}${b.note ? ' \u00b7 ' + b.note : ''}`, {});
-          if (onSelect) { grp.addEventListener('click', () => onSelect(b, r)); grp.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelect(b, r); } }); }
-        });
-        y0 += pitch;
-      }
-      s.setAttribute('aria-label', `${rows.filter((r) => !r.group).length} rows across ${days.length} days, ${dayText(days[0])} to ${dayText(days.at(-1))}`);
-    };
-    draw(); watch(el, draw); settle(draw);
-    const used = new Set(rows.flatMap((r) => (r.bars || []).map((b) => b.kind)));
-    const items = Object.entries(kinds).filter(([id]) => used.has(id)).map(([, k]) => ({ label: k.label, w: 22, draw: (sw) => { const st = kindStyle(el, k); paintRect(sw, st, 0, 0, 22, 12, 3); } }));
-    if (extras && today != null) items.push({ label: 'Today', w: 8, draw: (sw) => svg('line', { x1: 4, x2: 4, y1: 0, y2: 12, stroke: css(el, '--chart-1', '#2f6fdf'), 'stroke-width': 1.5 }, sw) });
-    return { get svg() { return el.querySelector(':scope > svg'); }, legend: legendEl(items, legend) };
-  }
-  // Is there enough cover? A team-by-day grid of slack against the minimum (+2, +1, 0, −1). Cells with room to spare
-  // stay plain, and one hue ramps toward the negative colour as the slack runs out; the headcount is in the tooltip.
-  //   rows: [{ label: 'Product design', sub: 'needs 7 of 10', values: [2, 1, 0, -1, null, …], titles: ['8 in', …] }]
-  //   cols: ['Mon 19', …]; comfort: the slack that needs no attention (2); null is a day with no cover to count (a dash)
-  function matrix(el, rows, { cols = [], comfort = 2, today = null, format = fmt.signed(), labelWidth = null, rowHeight = null, levels = ['Room to spare', 'Tight', 'At the minimum', 'Short'], legend = null } = {}) {
-    const level = (v) => (v >= comfort ? 0 : v > 0 ? 1 : v === 0 ? 2 : 3);
-    const styles = () => { const neg = css(el, '--negative', '#c4242a'), surface = css(el, '--surface', '#fff'), ink = css(el, '--ink', '#111'); return [{ fill: surface, ink: css(el, '--axis-ink', '#6b6b6b'), stroke: css(el, '--grid', '#e5e5e5') }, { fill: mix(el, neg, surface, 0.1), ink }, { fill: mix(el, neg, surface, 0.26), ink }, { fill: neg, ink: surface }]; };
-    const draw = () => {
-      const pitch = rowHeight || (rows.some((r) => r.sub) ? 44 : 32), head = 26;
-      const { s, w, h } = frame(el, head + rows.length * pitch);
-      const lw = labelWidth || Math.round(Math.min(220, Math.max(w < 480 ? 96 : 120, w * 0.22)));
-      const cw = (w - lw) / Math.max(1, cols.length), ST = styles(), muted = css(el, '--axis-ink', '#6b6b6b'), ink = css(el, '--ink', '#111');
-      const g = svg('g', {}, s);
-      dayHeads(g, s, el, cols, { x0: lw, cw, y: head - 10, today });
-      rows.forEach((r, k) => {
-        const y0 = head + k * pitch; rowLabel(g, s, el, r, { y0, pitch, lw });
-        const ch = Math.min(pitch - 6, 28), cy = y0 + (pitch - ch) / 2;
-        r.values.forEach((v, i) => {
-          const cx = lw + i * cw + 1;
-          if (v == null) { svg('rect', { x: cx + cw / 2 - 4, y: cy + ch / 2 - 1, width: 6, height: 2, fill: muted }, g); return; }
-          const st = ST[level(v)], cell = paintRect(g, { fill: st.fill }, cx, cy, cw - 2, ch, 3);
-          text(g, format(v), { x: cx + (cw - 2) / 2, y: cy + ch / 2 + 4, 'text-anchor': 'middle', 'font-size': 12, 'font-weight': level(v) === 3 ? 600 : 400, fill: st.ink });
-          titled(cell, `${r.label}, ${dayText(cols[i])}: ${r.titles?.[i] || format(v) + ' against the minimum'}`, {});
-        });
-      });
-      s.setAttribute('aria-label', `Cover against the minimum for ${rows.length} rows across ${cols.length} days`);
-    };
-    draw(); watch(el, draw); settle(draw);
-    const seen = new Set(rows.flatMap((r) => r.values.filter((v) => v != null).map(level)));
-    const ST = styles();
-    const items = [0, 1, 2, 3].filter((l) => seen.has(l)).map((l) => ({ label: levels[l], w: 14, draw: rectSwatch(l === 0 ? { fill: ST[0].fill, stroke: ST[0].stroke } : { fill: ST[l].fill }, 14, 12, 3) }));
-    return { get svg() { return el.querySelector(':scope > svg'); }, legend: legendEl(items, legend) };
-  }
-  // When, within the day: one row per item on a shared open–close axis. A 2px grey track, an ink dot at today's time and
-  // a hollow tick at the comparison day's, so "earlier than last Sunday" is drawn and not only written.
-  //   rows: [{ label: 'White sourdough', sub: 'Headingley', at: '11:20', compare: '12:05', value: '11:20', note: '3 h 40 m before close' }]
-  //   at or compare may be null (it did not sell out); step: minutes between axis labels (60).
-  function timeStrip(el, rows, { open = '08:00', close = '18:00', step = 60, todayLabel = 'Today', compareLabel = null, labelWidth = null, valueWidth = null, rowHeight = null, legend = null } = {}) {
-    const o = minutes(open), c = minutes(close);
-    const st = { today: { r: 4.5 }, compare: { w: 5, h: 12 } };
-    const dot = (parent, cx, cy) => svg('circle', { cx, cy, r: st.today.r, fill: css(el, '--ink', '#111') }, parent);
-    const tick = (parent, cx, cy) => svg('rect', { x: cx - st.compare.w / 2, y: cy - st.compare.h / 2, width: st.compare.w, height: st.compare.h, rx: 2.5, fill: css(el, '--surface', '#fff'), stroke: css(el, '--axis-ink', '#6b6b6b'), 'stroke-width': 1.5 }, parent);
-    const draw = () => {
-      const narrow = (el.clientWidth || 600) < 560, axisH = 24;
-      const pitch = rowHeight || (narrow ? 62 : rows.some((r) => r.sub || r.note) ? 44 : 32);
-      const { s, w, h } = frame(el, rows.length * pitch + axisH);
-      const lw = narrow ? 0 : labelWidth || Math.round(Math.min(200, Math.max(110, w * 0.26)));
-      const vw = narrow ? 0 : valueWidth ?? Math.min(w * 0.32, Math.max(0, ...rows.map((r) => Math.max(r.value ? measure(s, r.value, 13, 500) : 0, r.note ? measure(s, r.note, 12) : 0))) + (rows.some((r) => r.value || r.note) ? 16 : 0));
-      const x0 = narrow ? 18 : lw + 6, x1 = narrow ? w - 18 : w - vw - 6, tx = (m) => x0 + ((m - o) / Math.max(1, c - o)) * (x1 - x0);
-      const ink = css(el, '--ink', '#111'), muted = css(el, '--axis-ink', '#6b6b6b'), rule = css(el, '--rule', '#f0f0f0');
-      const track = css(el, '--chart-track', mix(el, ink, css(el, '--surface', '#fff'), 0.16));
-      const g = svg('g', {}, s), plotH = rows.length * pitch;
-      // the axis: one step from the opening, the labels thinned by the same rule as the charts
-      const marks = []; for (let m = Math.ceil(o / step) * step; m <= c; m += step) marks.push(m);
-      const picks = xPicks(marks.map(fmt.clock), x1 - x0);
-      for (const i of picks) { const xx = tx(marks[i]); if (!narrow) svg('line', { x1: xx, x2: xx, y1: 0, y2: plotH, stroke: rule, 'stroke-width': 1, 'shape-rendering': 'crispEdges' }, g); const lab = fmt.clock(marks[i]), tw = measure(s, lab, 12); text(g, lab, { x: Math.max(x0 - 2, Math.min(x1 + 6 - tw, xx - tw / 2)), y: plotH + 17, 'font-size': 12, fill: muted }); }
-      rows.forEach((r, k) => {
-        const y0 = k * pitch, cy = narrow ? y0 + pitch - 12 : y0 + pitch / 2;
-        if (narrow) {
-          const vwid = r.value ? measure(s, r.value, 13, 500) + 12 : 0;
-          text(g, fit(s, r.label, w - vwid, 14), { x: 0, y: y0 + 16, 'font-size': 14, fill: ink });
-          if (r.value) text(g, r.value, { x: w, y: y0 + 16, 'text-anchor': 'end', 'font-size': 13, 'font-weight': 500, fill: ink });
-          const second = [r.sub, r.note].filter(Boolean).join(' \u00b7 ');
-          if (second) text(g, fit(s, second, w, 12), { x: 0, y: y0 + 33, 'font-size': 12, fill: muted });
-        } else rowLabel(g, s, el, r, { y0, pitch, lw });
-        svg('line', { x1: x0, x2: x1, y1: cy, y2: cy, stroke: track, 'stroke-width': 2, 'stroke-linecap': 'round' }, g);
-        const cm = minutes(r.compare), am = minutes(r.at);
-        if (cm != null) titled(tick(g, tx(cm), cy), `${compareLabel || 'Comparison'}: ${fmt.clock(cm)}`, {});
-        if (am != null) titled(dot(g, tx(am), cy), `${todayLabel}: ${fmt.clock(am)}`, {});
-        if (narrow) return;
-        if (r.note) { if (r.value) text(g, r.value, { x: w, y: cy - 3, 'text-anchor': 'end', 'font-size': 13, 'font-weight': 500, fill: ink }); text(g, fit(s, r.note, vw - 8, 12), { x: w, y: r.value ? cy + 13 : cy + 4, 'text-anchor': 'end', 'font-size': 12, fill: muted }); }
-        else if (r.value) text(g, r.value, { x: w, y: cy + 5, 'text-anchor': 'end', 'font-size': 13, 'font-weight': 500, fill: ink });
-      });
-      s.setAttribute('aria-label', `${rows.length} rows between ${fmt.clock(o)} and ${fmt.clock(c)}`);
-    };
-    draw(); watch(el, draw); settle(draw);
-    const items = [];
-    if (rows.some((r) => minutes(r.at) != null)) items.push({ label: todayLabel, w: 10, draw: (sw) => dot(sw, 5, 6) });
-    if (compareLabel && rows.some((r) => minutes(r.compare) != null)) items.push({ label: compareLabel, w: 8, draw: (sw) => tick(sw, 4, 6) });
-    return { get svg() { return el.querySelector(':scope > svg'); }, legend: legendEl(items, legend) };
-  }
   // one observer per element: charts redraw on every poll, so a fresh observer each time would pile up forever
   function watch(el, draw) { el._draw = draw; if (!('ResizeObserver' in window) || el._ro) return; let w = el.clientWidth; el._ro = new ResizeObserver(() => { if (Math.abs(el.clientWidth - w) > 4) { w = el.clientWidth; el._draw?.(); } }); el._ro.observe(el); }
-  window.Charts = { line, bars, diverging, ring, barList, plan, bullet, timeline, matrix, timeStrip, ticks, fmt, segmentTooltip };
+  window.Charts = { line, bars, segmentTooltip };
 })();

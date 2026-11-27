@@ -21,7 +21,7 @@ function run(command, args, cwd) {
 
 try {
   await mkdir(join(source, 'public'), { recursive: true });
-  for (const file of ['desktop.mjs', 'windows-updater.mjs', 'migrate.mjs', 'server.mjs', 'package.json', 'package-lock.json',
+  for (const file of ['desktop.mjs', 'desktop-lifecycle.mjs', 'windows-updater.mjs', 'migrate.mjs', 'history.mjs', 'server.mjs', 'package.json', 'package-lock.json',
     'public/index.html', 'public/app.css', 'public/app.js', 'public/charts.js',
     'public/favicon.png', 'public/gpu-monitor.png']) {
     await copyFile(file, join(source, file));

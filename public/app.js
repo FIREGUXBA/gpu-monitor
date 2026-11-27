@@ -14,6 +14,8 @@
     failed: false,
     cards: new Map(),
   };
+  // Query state belongs to the refresh loop, not to a CSS dataset on the toolbar.
+  let queryStatus = null;
 
   const fmt = {
     gb: (mib) => (mib / 1024).toFixed(1),
@@ -242,6 +244,21 @@
     return picks;
   }
 
+  function drawUtilization(el, labels, values, { height, xAt }) {
+    Charts.line(el, {
+      labels,
+      series: [{ name: '利用率', values }],
+      fill: values.every((v) => v != null),
+      format: (v) => `${Math.round(v)}%`,
+      tickFormat: (v) => `${v}%`,
+      height,
+      yTicks: [0, 50, 100],
+      min: 0,
+      max: 100,
+      xAt,
+    });
+  }
+
   function drawSparks(data, refreshCharts = false) {
     if (state.route !== 'overview') return;
     data.gpus.forEach((g, pos) => {
@@ -251,16 +268,8 @@
       if (!el.clientWidth || (el._hovered && !refreshCharts)) return;
       const buckets = bucketHistory(data, pos, el.clientWidth);
       if (!buckets?.mean.some((v) => v != null)) { clearChart(el, data); return; }
-      Charts.line(el, {
-        labels: buckets.labels,
-        series: [{ name: '利用率', values: buckets.mean }],
-        fill: buckets.mean.every((v) => v != null),
-        format: (v) => `${Math.round(v)}%`,
-        tickFormat: (v) => `${v}%`,
+      drawUtilization(el, buckets.labels, buckets.mean, {
         height: Math.round(el.clientHeight) || 88,
-        yTicks: [0, 50, 100],
-        min: 0,
-        max: 100,
         xAt: minutePicks(buckets.labels, el.clientWidth),
       });
     });
@@ -371,16 +380,8 @@
     // on the time axis and simply leave the earlier buckets empty
     const withMem = b?.mem.some((v) => v != null);
     if (!b?.mean.some((v) => v != null)) clearChart(lineEl, data);
-    else Charts.line(lineEl, {
-      labels: b.labels,
-      series: [{ name: '利用率', values: b.mean }],
-      fill: b.mean.every((v) => v != null),
-      format: (v) => `${Math.round(v)}%`,
-      tickFormat: (v) => `${v}%`,
+    else drawUtilization(lineEl, b.labels, b.mean, {
       height: 200,
-      yTicks: [0, 50, 100],
-      min: 0,
-      max: 100,
       xAt: withMem ? [] : minutePicks(b.labels, lineEl.clientWidth),
     });
     $('#gpuMemBlock').hidden = !withMem;
@@ -753,6 +754,8 @@
   async function fetchState(historyOnly = false) {
     const request = ++latestRequest;
     const range = state.range;
+    const liveSnapshot = !historyOnly && queryStatus !== 'loading';
+    const wasPaused = state.paused;
     const pausedAt = historyOnly ? state.data?.sampledAt : null;
     const query = Array.isArray(range) ? { from: range[0], to: range[1] }
       : pausedAt ? { from: pausedAt - range * MINUTE, to: pausedAt }
@@ -762,7 +765,9 @@
       if (!res.ok && res.status !== 503) throw new Error(String(res.status));
       const data = await res.json();
       if (request !== latestRequest) return;
-      const refreshCharts = Boolean(rangeControl.dataset.query);
+      // A live reply that left before the user paused must not advance the frozen snapshot.
+      if (liveSnapshot && !wasPaused && state.paused) return;
+      const refreshCharts = Boolean(queryStatus);
       if (historyOnly && state.paused && state.data) {
         if (data.target !== state.data.target) throw new Error('监控目标已变更');
         state.data.history = data.history;
@@ -784,7 +789,7 @@
       }
     } catch {
       if (request !== latestRequest) return;
-      if (rangeControl.dataset.query) {
+      if (queryStatus) {
         setRangeQuery('error');
         return;
       }
@@ -795,7 +800,7 @@
   }
 
   async function loop() {
-    if (!state.paused && rangeControl.dataset.query !== 'loading') await fetchState();
+    if (!state.paused && queryStatus !== 'loading') await fetchState();
     timer = setTimeout(loop, 2000);
   }
 
@@ -806,7 +811,6 @@
   const rangeError = $('#rangeError');
   const rangeTrigger = $('#rangeTrigger');
   const detailRangeTrigger = $('#gpuDetailRangeTrigger');
-  const rangeControl = $('#historyRange');
   const rangeControls = $$('.history-range');
   const rangeLabels = $$('.range-label');
   const rangeQueryStatuses = $$('.range-query-status');
@@ -815,6 +819,7 @@
   const presets = $$('[data-range]');
 
   function setRangeQuery(status) {
+    queryStatus = status;
     rangeControls.forEach((el) => {
       if (status) el.dataset.query = status;
       else delete el.dataset.query;
@@ -860,7 +865,7 @@
     rangeLabels.forEach((el) => setText(el, label));
     rangePopover.hidePopover();
     (gpuDetail.hidden ? rangeTrigger : detailRangeTrigger).focus();
-    if (range === state.range && state.data?.history && !rangeControl.dataset.query) return;
+    if (range === state.range && state.data?.history && !queryStatus) return;
     state.range = range;
     setRangeQuery('loading');
     fetchState(state.paused);
@@ -1174,7 +1179,7 @@
   presets.forEach((b) => b.addEventListener('click', () => setRange(b, Number(b.dataset.range))));
 
   document.addEventListener('visibilitychange', () => {
-    if (!document.hidden && !state.paused && rangeControl.dataset.query !== 'loading') fetchState();
+    if (!document.hidden && !state.paused && queryStatus !== 'loading') fetchState();
   });
   window.addEventListener('hashchange', applyRoute);
   window.addEventListener('resize', () => { if (state.data) drawSparks(state.data); });
