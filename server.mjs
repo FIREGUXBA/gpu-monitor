@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import os from 'node:os';
 import { Client } from 'ssh2';
 import { createHistoryStore } from './history.mjs';
+import { createNotifier } from './notify.mjs';
 
 const ROOT = fileURLToPath(new URL('.', import.meta.url));
 const PUBLIC = join(ROOT, 'public');
@@ -97,6 +98,7 @@ const historyStore = createHistoryStore({
   retainMs: RETAIN_MS,
   compactEvery: COMPACT_EVERY,
 });
+const notifier = createNotifier({ dataDir: DATA_DIR, pollMs: POLL_MS });
 
 const keyTarget = () => (active.mode === 'key' && active.host) || SSH_HOST || null;
 
@@ -562,6 +564,7 @@ function parseGpus(lines) {
 // A target switch invalidates old samples and swaps the history as one operation.
 async function resetForTarget(file) {
   generation++;
+  notifier.resetTarget(generation);
   cudaVersion = null;
   snapshot = null;
   lastError = null;
@@ -690,6 +693,7 @@ async function sample(gen) {
   };
   lastError = null;
   lastGoodAt = now;
+  try { notifier.onSample(snapshot, gen); } catch {}
   if (!stopping && !cudaPending) cudaTask = ensureCuda(gen);
 }
 
@@ -706,6 +710,7 @@ async function loop() {
     // 没有默认服务器：等用户在界面里选一台，不反复试连
     snapshot = null;
     lastError = null;
+    notifier.markUnknown();
     schedulePoll(1000);
     return;
   }
@@ -716,6 +721,7 @@ async function loop() {
   } catch (err) {
     if (gen === generation) {
       lastError = String(err && err.message ? err.message : err).split('\n')[0].slice(0, 200);
+      notifier.markUnknown();
       if (!snapshot) snapshot = errorSnapshot();
     }
   }
@@ -887,11 +893,13 @@ async function logout() {
 export async function startMonitor() {
   await loadConnection();
   await historyStore.use(historyFile);
+  await notifier.load();
   schedulePoll(0);
 }
 
 export async function stopMonitor() {
   stopping = true;
+  notifier.stop();
   clearTimeout(pollTimer);
   await Promise.allSettled([sampling, cudaTask, connectionChange]);
   closeSsh2();
@@ -955,6 +963,7 @@ export async function handleRequest(req) {
           mode: active.mode,
           saved: savedConfig,
           connection: connectionInfo(),
+          notify: notifier.state(),
         }
       : {
           target: configured ? targetLabel() : null,
@@ -970,6 +979,7 @@ export async function handleRequest(req) {
           mode: active.mode,
           saved: savedConfig,
           connection: connectionInfo(),
+          notify: notifier.state(),
         };
     return sendJson(snapshot ? 200 : 503, body);
   }
@@ -979,6 +989,47 @@ export async function handleRequest(req) {
       return sendJson(405, { error: 'method not allowed' });
     }
     return sendJson(200, { default: SSH_HOST || null, hosts: await sshHostAliases() });
+  }
+
+  if (url.pathname === '/api/notify') {
+    if (req.method === 'GET') {
+      return sendJson(200, notifier.view());
+    }
+    if (req.method === 'PUT') {
+      if (!/^application\/json\b/.test(req.headers.get('content-type') || '')) {
+        return sendJson(415, { error: '请使用 application/json' });
+      }
+      try {
+        return sendJson(200, await notifier.update(await readJson(req)));
+      } catch (err) {
+        return sendJson(err.status || 500, { error: String(err.message || err) });
+      }
+    }
+    return sendJson(405, { error: 'method not allowed' });
+  }
+
+  if (url.pathname === '/api/notify/watch') {
+    if (req.method === 'DELETE') {
+      return sendJson(200, await notifier.cancelWatch());
+    }
+    if (req.method === 'POST') {
+      if (!/^application\/json\b/.test(req.headers.get('content-type') || '')) {
+        return sendJson(415, { error: '请使用 application/json' });
+      }
+      try {
+        return sendJson(200, await notifier.startWatch(await readJson(req)));
+      } catch (err) {
+        return sendJson(err.status || 500, { error: String(err.message || err) });
+      }
+    }
+    return sendJson(405, { error: 'method not allowed' });
+  }
+
+  if (url.pathname === '/api/notify/test') {
+    if (req.method !== 'POST') {
+      return sendJson(405, { error: 'method not allowed' });
+    }
+    return sendJson(200, await notifier.test());
   }
 
   if (url.pathname === '/api/connection') {
@@ -1042,7 +1093,7 @@ if (!DESKTOP && process.argv[1] && resolve(process.argv[1]) === fileURLToPath(im
   const server = createServer(async (req, res) => {
     try {
       const options = { method: req.method, headers: req.headers };
-      if (req.method === 'POST') {
+      if (['POST', 'PUT', 'PATCH'].includes(req.method)) {
         options.body = Readable.toWeb(Readable.from(req.iterator({ destroyOnReturn: false })));
         options.duplex = 'half';
       }

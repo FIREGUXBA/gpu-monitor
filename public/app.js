@@ -695,6 +695,17 @@
     btn.setAttribute('aria-label', label);
   }
 
+  function syncNotifyButton(n) {
+    const watch = n?.watch;
+    const btn = $('#notifyBtn');
+    $('#notifyDot').hidden = !watch;
+    const label = watch
+      ? `蹲守中：${watch.cards} 块 GPU，每块 ≥${watch.minFreeGb} GB`
+      : '通知设置';
+    btn.title = label;
+    btn.setAttribute('aria-label', label);
+  }
+
   /* ---------- stamp / notice ---------- */
   function renderStamp() {
     const d = state.data;
@@ -725,6 +736,7 @@
     renderStamp();
     syncTitle();
     syncConnectButton();
+    syncNotifyButton(data.notify);
     const overview = state.route === 'overview';
     if (overview) {
       setText($('#scope'), data.configured === false
@@ -1018,7 +1030,7 @@
 
   function setConnectMode(mode) {
     connectMode = mode;
-    $$('.mode-tabs button').forEach((b) => b.setAttribute('aria-pressed', b.dataset.mode === mode ? 'true' : 'false'));
+    $$('#connectDialog .mode-tabs button').forEach((b) => b.setAttribute('aria-pressed', b.dataset.mode === mode ? 'true' : 'false'));
     keyFields.hidden = mode !== 'key';
     passFields.hidden = mode !== 'password';
     trustRow.hidden = true;
@@ -1124,13 +1136,208 @@
   });
 
   $('#connectBtn').addEventListener('click', openConnect);
-  $$('.mode-tabs button').forEach((b) => b.addEventListener('click', () => setConnectMode(b.dataset.mode)));
+  $$('#connectDialog .mode-tabs button').forEach((b) => b.addEventListener('click', () => setConnectMode(b.dataset.mode)));
   $('#connectClose').addEventListener('click', () => connectDialog.close());
   connectDialog.addEventListener('close', () => {
     passInput.value = '';
   });
   connectDialog.addEventListener('click', (e) => {
     if (e.target === connectDialog) connectDialog.close();
+  });
+
+  /* ---------- 微信通知弹窗 ---------- */
+  const notifyDialog = $('#notifyDialog');
+  const notifyForm = $('#notifyForm');
+  const notifyError = $('#notifyError');
+  const notifyStatus = $('#notifyStatus');
+  const notifyLast = $('#notifyLast');
+  const notifyWatchBtn = $('#notifyWatch');
+  const nSpt = $('#nSpt');
+  const nSck = $('#nSck');
+  const sptFields = $('#notifySptFields');
+  const scFields = $('#notifyScFields');
+  const channelTabs = $$('#notifyDialog [data-channel]');
+  const nCards = $('#nCards');
+  const nFree = $('#nFree');
+  const nUtil = $('#nUtil');
+  const nWindow = $('#nWindow');
+  const nTolerance = $('#nTolerance');
+  let notifyView = null;
+  let notifyChannel = 'spt';
+
+
+  function syncNotifyStatus() {
+    if (!notifyView) return;
+    const names = [notifyView.hasSpt && 'WxPusher', notifyView.hasServerchan && 'Server酱'].filter(Boolean);
+    if (names.length === 2) setText(notifyStatus, '已配置 WxPusher 和 Server酱，达标时都会推送。');
+    else if (names.length === 1) setText(notifyStatus, `已配置 ${names[0]}，达标时推送。`);
+    else setText(notifyStatus, '未配置通道：填写任一凭据即可。');
+  }
+
+  function setNotifyChannel(channel) {
+    notifyChannel = channel === 'serverchan' ? 'serverchan' : 'spt';
+    channelTabs.forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.channel === notifyChannel)));
+    sptFields.hidden = notifyChannel !== 'spt';
+    scFields.hidden = notifyChannel !== 'serverchan';
+    syncNotifyStatus();
+  }
+
+  function notifyRequest(method, path, body) {
+    return fetch(path, {
+      method,
+      headers: body ? { 'content-type': 'application/json' } : undefined,
+      body: body ? JSON.stringify(body) : undefined,
+    }).then(async (res) => {
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || `请求失败（${res.status}）`);
+      return data;
+    });
+  }
+
+  function showNotifyError(msg) {
+    notifyError.textContent = msg;
+    notifyError.hidden = false;
+  }
+
+  function notifyLastText(last) {
+    if (!last) return '还没有推送记录。';
+    const when = fmt.clock(last.at);
+    return last.ok
+      ? `上次推送成功 · ${when}${last.error ? ` · ${last.error}` : ''}`
+      : `上次推送失败 · ${when} · ${last.error || '未知错误'}`;
+  }
+
+  function fillNotify(v) {
+    notifyView = v;
+    const w = v.watch || v.defaults;
+    nSpt.value = v.spt || '';
+    nSck.value = v.serverchanKey || '';
+    nCards.value = w.cards;
+    nFree.value = w.minFreeGb;
+    nUtil.value = v.rule.utilIdlePct;
+    nWindow.value = v.rule.windowSec;
+    nTolerance.value = v.rule.tolerance;
+    setNotifyChannel(v.channel || 'spt');
+    setText(notifyLast, notifyLastText(v.lastNotify));
+    notifyWatchBtn.textContent = v.watch ? '取消蹲守' : '开始蹲守';
+    notifyError.hidden = true;
+    syncNotifyButton(v);
+  }
+
+  async function openNotify() {
+    notifyError.hidden = true;
+    notifyDialog.showModal();
+    try {
+      fillNotify(await notifyRequest('GET', '/api/notify'));
+      const target = notifyView?.ready
+        ? nCards
+        : notifyChannel === 'serverchan' ? nSck : nSpt;
+      setTimeout(() => target.focus(), 20);
+    } catch (err) {
+      showNotifyError(String(err.message || err));
+    }
+  }
+
+  async function saveNotify(syncFields = true) {
+    const v = await notifyRequest('PUT', '/api/notify', {
+      channel: notifyChannel,
+      spt: nSpt.value.trim(),
+      serverchanKey: nSck.value.trim(),
+      defaults: { cards: Number(nCards.value), minFreeGb: Number(nFree.value) },
+      rule: { utilIdlePct: Number(nUtil.value), windowSec: Number(nWindow.value), tolerance: Number(nTolerance.value) },
+    });
+    if (syncFields) {
+      fillNotify(v);
+    } else {
+      notifyView = v;
+      syncNotifyStatus();
+      syncNotifyButton(v);
+      notifyWatchBtn.textContent = v.watch ? '取消蹲守' : '开始蹲守';
+      setText(notifyLast, notifyLastText(v.lastNotify));
+      notifyError.hidden = true;
+    }
+    return v;
+  }
+
+  function autoSaveNotify() {
+    void saveNotify(false).catch((err) => showNotifyError(String(err.message || err)));
+  }
+
+  async function withNotifyBusy(btn, run) {
+    btn.disabled = true;
+    notifyError.hidden = true;
+    try {
+      await run();
+    } catch (err) {
+      showNotifyError(String(err.message || err));
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  notifyForm.addEventListener('submit', (e) => {
+    e.preventDefault();
+    autoSaveNotify();
+  });
+
+  // No save button: leaving a field stores the current values.
+  [nSpt, nSck, nCards, nFree, nUtil, nWindow, nTolerance].forEach((el) => el.addEventListener('change', autoSaveNotify));
+
+  notifyWatchBtn.addEventListener('click', () => {
+    void withNotifyBusy(notifyWatchBtn, async () => {
+      if (notifyView?.watch) {
+        fillNotify(await notifyRequest('DELETE', '/api/notify/watch'));
+        live('已取消蹲守');
+      } else {
+        const v = await saveNotify();
+        if (!v.ready) {
+          showNotifyError('先填写任一通道的凭据才能接收通知。');
+          return;
+        }
+        fillNotify(await notifyRequest('POST', '/api/notify/watch', {
+          cards: v.defaults.cards,
+          minFreeGb: v.defaults.minFreeGb,
+        }));
+        live('已开始蹲守，余量达标后会推送微信');
+      }
+      await fetchState();
+    });
+  });
+
+  $('#notifyTest').addEventListener('click', () => {
+    const btn = $('#notifyTest');
+    void withNotifyBusy(btn, async () => {
+      const v = await saveNotify();
+      if (!v.ready) {
+        showNotifyError('先填写任一通道的凭据才能发送测试消息。');
+        return;
+      }
+      const result = await notifyRequest('POST', '/api/notify/test');
+      if (!result.ok) {
+        showNotifyError(`测试推送失败：${result.error || '未知错误'}`);
+        return;
+      }
+      const note = result.error ? `测试消息已发送，但 ${result.error}` : '测试消息已发送';
+      setText(notifyLast, `${note} · ${fmt.clock(Date.now())}`);
+      live(note);
+    });
+  });
+
+  $('#notifyBtn').addEventListener('click', openNotify);
+  channelTabs.forEach((b) => b.addEventListener('click', () => {
+    setNotifyChannel(b.dataset.channel);
+    autoSaveNotify();
+  }));
+  // A masked credential must not get a new token appended to it.
+  nSpt.addEventListener('focus', () => { if (nSpt.value.startsWith('SPT_•')) nSpt.select(); });
+  nSck.addEventListener('focus', () => { if (nSck.value.includes('••••')) nSck.select(); });
+  $('#notifyClose').addEventListener('click', () => notifyDialog.close());
+  notifyDialog.addEventListener('close', () => {
+    // Closing by Escape or the X must not lose an edit that never blurred.
+    void saveNotify(false).catch(() => {});
+  });
+  notifyDialog.addEventListener('click', (e) => {
+    if (e.target === notifyDialog) notifyDialog.close();
   });
 
   /* ---------- events ---------- */

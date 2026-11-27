@@ -49,7 +49,7 @@ _Avoid_: idle, 空闲, 达标（口语可，文档用 qualified）
 _Avoid_: 告警, 报警, notify call
 
 **notification channel**:
-承载 **push** 的通道。本期只有 WxPusher 极简 SPT。
+承载 **push** 的通道。支持 WxPusher 极简 SPT 与 Server酱 SendKey；配置多个时并行推送，任一成功即结束 watch。
 _Avoid_: webhook, bot
 
 **SPT**:
@@ -64,7 +64,7 @@ _Avoid_: token, key, appToken
 |---|---|---|
 | 1 | 交付形态 | 内建进现有 Electron 进程，复用 2 秒采样循环 |
 | 2 | 多用户 | 每人装一份 app，各自配自己的微信；SPT 不进发行版 |
-| 3 | 通道 | WxPusher **极简 SPT**（扫码即得一个 `SPT_xxx`） |
+| 3 | 通道 | WxPusher **极简 SPT** 与 **Server酱 SendKey**，可以同时配置，达标时都推送 |
 | 4 | 凭据存储 | 应用内设置面板填写 → `data/notify.json`（0600） |
 | 5 | watch 参数 | 有默认值，也能在面板里临时开一次 |
 | 6 | 判定 | watch window 内 **≥90% raw sample** qualified 才算 |

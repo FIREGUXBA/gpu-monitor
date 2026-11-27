@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { join, resolve } from 'node:path';
-import { app, BrowserWindow, dialog, Menu, nativeImage, nativeTheme, protocol, session, Tray } from 'electron';
+import { app, BrowserWindow, dialog, Menu, nativeImage, nativeTheme, protocol, session, shell, Tray } from 'electron';
 import { migrateSourceData } from './migrate.mjs';
 import { startWindowsUpdater } from './windows-updater.mjs';
 import { createShutdown } from './desktop-lifecycle.mjs';
@@ -128,9 +128,15 @@ if (!app.requestSingleInstanceLock()) {
       ...(mac && { titleBarStyle: 'hidden', titleBarOverlay: true, trafficLightPosition: { x: 14, y: 11 } }),
       webPreferences: { contextIsolation: true, sandbox: true, nodeIntegration: false },
     });
-    window.webContents.on('will-frame-navigate', (event) => event.preventDefault());
+    window.webContents.on('will-frame-navigate', (event) => {
+      event.preventDefault();
+      if (/^https:\/\//i.test(event.url)) void shell.openExternal(event.url);
+    });
     window.webContents.on('will-redirect', (event) => event.preventDefault());
-    window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+    window.webContents.setWindowOpenHandler(({ url }) => {
+      if (/^https:\/\//i.test(url)) void shell.openExternal(url);
+      return { action: 'deny' };
+    });
     window.on('close', (event) => {
       if (shutdown.started) return;
       event.preventDefault();
